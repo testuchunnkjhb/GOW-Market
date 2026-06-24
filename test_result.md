@@ -39,7 +39,8 @@
 ##     status_history:
 ##         -working: true  # or false or "NA"
 ##         -agent: "main"  # or "testing" or "user"
-##         -comment: "Detailed comment about status"
+##         -commen
+t: "Detailed comment about status"
 ##
 ## metadata:
 ##   created_by: "main_agent"
