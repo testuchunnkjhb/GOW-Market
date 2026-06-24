@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -21,18 +21,7 @@ const Profile = () => {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("all");
 
-  useEffect(() => {
-    if (authLoading) return;
-    
-    if (!token) {
-      navigate("/");
-      return;
-    }
-    fetchMyAds();
-    fetchFavorites();
-  }, [token, authLoading, navigate]);
-
-  const fetchMyAds = async () => {
+  const fetchMyAds = useCallback(async () => {
     setLoading(true);
     try {
       const response = await axios.get(`${API}/users/me/ads`, {
@@ -44,9 +33,9 @@ const Profile = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [token, t]);
 
-  const fetchFavorites = async () => {
+  const fetchFavorites = useCallback(async () => {
     try {
       const response = await axios.get(`${API}/favorites`, {
         headers: { Authorization: `Bearer ${token}` }
@@ -55,12 +44,23 @@ const Profile = () => {
     } catch (error) {
       console.error("Failed to fetch favorites:", error);
     }
-  };
+  }, [token]);
 
-  const filterAds = (status) => {
+  useEffect(() => {
+    if (authLoading) return;
+    
+    if (!token) {
+      navigate("/");
+      return;
+    }
+    fetchMyAds();
+    fetchFavorites();
+  }, [token, authLoading, navigate, fetchMyAds, fetchFavorites]);
+
+  const filterAds = useCallback((status) => {
     if (status === "all") return ads;
     return ads.filter(ad => ad.status === status);
-  };
+  }, [ads]);
 
   const getStatusBadge = (status) => {
     const colors = {
@@ -71,7 +71,7 @@ const Profile = () => {
     return colors[status] || "";
   };
 
-  const renderAdCard = (ad) => (
+  const renderAdCard = useCallback((ad) => (
     <div
       key={ad.id}
       className="border border-zinc-200 dark:border-zinc-800 rounded-lg overflow-hidden hover:-translate-y-1 hover:shadow-lg transition"
@@ -116,7 +116,7 @@ const Profile = () => {
         </div>
       </div>
     </div>
-  );
+  ), [navigate, t]);
 
   if (!user) {
     return null;
