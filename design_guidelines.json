@@ -1,0 +1,102 @@
+{
+  "project_name": "GOW Market",
+  "domain": "Online Marketplace",
+  "theme": {
+    "default": "light",
+    "supported_modes": ["light", "dark"]
+  },
+  "archetype": "Archetype 4 (Swiss & High-Contrast)",
+  "emotion_and_tone": "Trustworthy, high-speed, invisible velocity, restraint, and certainty. The UI should recede to make the product the hero. Driven by the 'Restraint & Certainty' e-commerce pattern.",
+  "typography": {
+    "rules": "Use these explicit font choices. Avoid generic sans-serif for headings.",
+    "headings": {
+      "font_family": "'Cabinet Grotesk', sans-serif",
+      "weight": "font-black or font-bold",
+      "tracking": "tracking-tight",
+      "sizes": {
+        "h1": "text-4xl sm:text-5xl lg:text-6xl",
+        "h2": "text-2xl sm:text-3xl lg:text-4xl",
+        "h3": "text-xl sm:text-2xl",
+        "h4": "text-lg sm:text-xl"
+      }
+    },
+    "body": {
+      "font_family": "'Manrope', sans-serif",
+      "weight": "font-medium",
+      "sizes": {
+        "base": "text-base",
+        "small": "text-sm",
+        "tiny_labels": "text-xs tracking-[0.2em] uppercase"
+      }
+    }
+  },
+  "colors": {
+    "description": "High contrast functional palette to allow product photos to shine.",
+    "background": {
+      "light": "#FFFFFF",
+      "dark": "#0A0A0A"
+    },
+    "surface": {
+      "light": "#F4F4F5",
+      "dark": "#18181B"
+    },
+    "primary_accent": "#E60000",
+    "secondary_accent": "#0055FF",
+    "text": {
+      "primary_light": "#09090B",
+      "secondary_light": "#71717A",
+      "primary_dark": "#FAFAFA",
+      "secondary_dark": "#A1A1AA"
+    },
+    "borders": {
+      "light": "#E4E4E7",
+      "dark": "#27272A"
+    }
+  },
+  "layout_and_spacing": {
+    "spacing_scale": "Use generous spacing. For sections, utilize py-12 to py-24. Containers with borders must have p-6 or p-8 internal padding to prevent collision.",
+    "grid_system": "Use the 'Control Room' dense bento grid for admin/dashboards (grid-cols-1 md:grid-cols-3 lg:grid-cols-4) with gap-4 or gap-6. For the public marketplace, use fluid responsive grids for products.",
+    "alignment": "Strict left-alignment for product details, ad listings, and dense text. Center-align only for empty states or hero text."
+  },
+  "components_strategy": {
+    "general": "Build with React.js (.js files, NOT .tsx) and Tailwind CSS. Customize Shadcn primitives heavily.",
+    "cards": "Go for flat backgrounds with 1px subtle borders and no shadows by default. On hover, apply a slight lift (-translate-y-1) and shadow-lg. Do not overuse generic Shadcn Card component blindly.",
+    "buttons": "Sharp edges or subtle roundness (max 8px border-radius). Use high contrast text. Primary CTAs use the primary_accent color. NEVER rely on inheritance for hover states; always specify (e.g., hover:bg-red-700 hover:text-white).",
+    "forms": "Do NOT use native HTML <input type='date'> or <select>. Use Shadcn's Form, Input, Select, and Calendar components. Form inputs must have clear focus states (e.g., focus:ring-2 focus:ring-black).",
+    "navigation": "Sticky top header with glassmorphism (backdrop-blur-xl bg-white/80 or bg-black/60) and a 1px bottom border. Must include language switch (UZ/RU), search, and primary sections.",
+    "icons": "Use lucide-react for all scalable UI adornments."
+  },
+  "media_and_images": {
+    "instructions": "The main agent relies ENTIRELY on these URLs. Use these exact URLs. DO NOT use generic placeholders like via.placeholder.com.",
+    "hero_background": {
+      "url": "https://images.unsplash.com/photo-1553544438-f38bf768a907?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NDh8MHwxfHNlYXJjaHwyfHxzYW1hcmthbmQlMjBhcmNoaXRlY3R1cmV8ZW58MHx8fHwxNzgyMjg4NzYzfDA&ixlib=rb-4.1.0&q=85",
+      "description": "Samarkand city architecture to establish local context."
+    },
+    "categories": {
+      "electronics": "https://images.unsplash.com/photo-1511707171634-5f897ff02aa9?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NjZ8MHwxfHNlYXJjaHwxfHxpcGhvbmUlMjBzbWFydHBob25lfGVufDB8fHx8MTc4MjI4ODc2M3ww&ixlib=rb-4.1.0&q=85",
+      "vehicles": "https://images.unsplash.com/photo-1550355291-bbee04a92027?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA4Mzl8MHwxfHNlYXJjaHwyfHxtb2Rlcm4lMjBjYXJ8ZW58MHx8fHwxNzgyMjg4NzYzfDA&ixlib=rb-4.1.0&q=85",
+      "real_estate": "https://images.pexels.com/photos/276746/pexels-photo-276746.jpeg"
+    },
+    "fallback_placeholder": "https://images.pexels.com/photos/19439173/pexels-photo-19439173.jpeg"
+  },
+  "interactions_and_motion": {
+    "hover_states": "All interactive elements must have a transition effect, e.g., transition: transform 0.2s ease, opacity 0.2s ease.",
+    "micro_interactions": "Implement staggered entrance animations for product lists and dashboards. Avoid heavy 3D or distracting motion; optimize for speed.",
+    "overlays": "Hero image overlays must be transparent enough to see the image (e.g., max bg-black/50). Prefer gradient overlays for text contrast."
+  },
+  "accessibility_and_testing": {
+    "contrast": "Maintain WCAG AA contrast (4.5:1 for normal text). Add drop-shadows to text placed over images.",
+    "testing_attributes": "CRITICAL: All interactive and key informational elements MUST include a 'data-testid' attribute. Format: kebab-case, role-based. Examples: data-testid='login-submit-button', data-testid='search-input', data-testid='product-card', data-testid='category-link'."
+  },
+  "instructions_to_main_agent": [
+    "Write all React code in .js files, NOT .tsx.",
+    "Ensure 'data-testid' attributes are present on every interactive element.",
+    "Construct the UI utilizing Tailwind CSS alongside Shadcn UI primitives.",
+    "Include both Uzbek (UZ) and Russian (RU) text elements, setting Uzbek as the default.",
+    "The hero section must prominently feature the text: 'Soting va xarid qiling Samarqandda'.",
+    "Develop the specified multi-step authentication process (Phone Input -> SMS Verification -> Profile Creation).",
+    "Implement the detailed Create New Ad workflow with specified fields and interactive map.",
+    "Build the user profile dashboard and admin dashboard per the problem statement requirements.",
+    "Ensure seamless toggling between Light and Dark mode."
+  ]
+}

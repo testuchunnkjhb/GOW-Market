@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  # MongoDB Database
+  mongodb:
+    image: mongo:7.0
+    container_name: gowmarket-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    environment:
+      - MONGO_INITDB_DATABASE=gowmarket_db
+    networks:
+      - gowmarket-network
+
+  # FastAPI Backend
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: gowmarket-backend
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./backend:/app
+    environment:
+      - MONGO_URL=mongodb://mongodb:27017
+      - DB_NAME=gowmarket_db
+      - CORS_ORIGINS=http://localhost:3000
+    depends_on:
+      - mongodb
+    networks:
+      - gowmarket-network
+    command: uvicorn server:app --host 0.0.0.0 --port 8001 --reload
+
+  # React Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: gowmarket-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - REACT_APP_BACKEND_URL=http://localhost:8001
+    depends_on:
+      - backend
+    networks:
+      - gowmarket-network
+    command: yarn start
+
+volumes:
+  mongodb_data:
+    driver: local
+
+networks:
+  gowmarket-network:
+    driver: bridge
