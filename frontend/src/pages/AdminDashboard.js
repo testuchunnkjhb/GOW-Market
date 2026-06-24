@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import axios from "axios";
@@ -32,19 +32,7 @@ const AdminDashboard = () => {
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("dashboard");
 
-  useEffect(() => {
-    if (authLoading) return;
-    
-    if (!token || !user || user.role !== "admin") {
-      navigate("/");
-      return;
-    }
-    fetchStats();
-    fetchAds("pending");
-    fetchPayments();
-  }, [token, user, authLoading, navigate]);
-
-  const fetchStats = async () => {
+  const fetchStats = useCallback(async () => {
     try {
       const response = await axios.get(`${API}/admin/stats`, {
         headers: { Authorization: `Bearer ${token}` }
@@ -53,9 +41,9 @@ const AdminDashboard = () => {
     } catch (error) {
       toast.error("Xatolik");
     }
-  };
+  }, [token]);
 
-  const fetchAds = async (status = null) => {
+  const fetchAds = useCallback(async (status = null) => {
     setLoading(true);
     try {
       const url = status ? `${API}/admin/ads?status=${status}` : `${API}/admin/ads`;
@@ -68,9 +56,9 @@ const AdminDashboard = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [token]);
 
-  const fetchPayments = async () => {
+  const fetchPayments = useCallback(async () => {
     try {
       const response = await axios.get(`${API}/admin/payments`, {
         headers: { Authorization: `Bearer ${token}` }
@@ -79,9 +67,21 @@ const AdminDashboard = () => {
     } catch (error) {
       console.error("Failed to fetch payments:", error);
     }
-  };
+  }, [token]);
 
-  const handleAction = async (adId, action) => {
+  useEffect(() => {
+    if (authLoading) return;
+    
+    if (!token || !user || user.role !== "admin") {
+      navigate("/");
+      return;
+    }
+    fetchStats();
+    fetchAds("pending");
+    fetchPayments();
+  }, [token, user, authLoading, navigate, fetchStats, fetchAds, fetchPayments]);
+
+  const handleAction = useCallback(async (adId, action) => {
     try {
       await axios.post(
         `${API}/admin/ads/action`,
@@ -94,14 +94,14 @@ const AdminDashboard = () => {
     } catch (error) {
       toast.error("Xatolik");
     }
-  };
+  }, [token, activeTab, fetchStats, fetchAds]);
 
-  const handleTabChange = (value) => {
+  const handleTabChange = useCallback((value) => {
     setActiveTab(value);
     if (value !== "dashboard" && value !== "payments") {
       fetchAds(value === "all" ? null : value);
     }
-  };
+  }, [fetchAds]);
 
   if (authLoading) {
     return (
