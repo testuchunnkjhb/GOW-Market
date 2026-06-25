@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -21,21 +21,27 @@ const Home = () => {
   const [loading, setLoading] = useState(true);
   const [selectedCategory, setSelectedCategory] = useState(null);
 
+  // Sync selectedCategory with URL params
   useEffect(() => {
-    fetchCategories();
-    fetchAds();
+    const categoryParam = searchParams.get("category");
+    if (categoryParam) {
+      setSelectedCategory(categoryParam);
+    } else {
+      setSelectedCategory(null);
+    }
   }, [searchParams]);
 
-  const fetchCategories = async () => {
+  const fetchCategories = useCallback(async () => {
     try {
       const response = await axios.get(`${API}/categories`);
       setCategories(response.data);
     } catch (error) {
       console.error("Failed to fetch categories:", error);
+      toast.error(t("error"), { description: t("failed_to_load_categories") });
     }
-  };
+  }, [t]);
 
-  const fetchAds = async () => {
+  const fetchAds = useCallback(async () => {
     setLoading(true);
     try {
       const search = searchParams.get("search");
@@ -49,15 +55,15 @@ const Home = () => {
       setAds(response.data);
     } catch (error) {
       console.error("Failed to fetch ads:", error);
-      toast.error(t("error"));
+      toast.error(t("error"), { description: t("failed_to_load_ads") });
     } finally {
       setLoading(false);
     }
-  };
+  }, [searchParams, t]);
 
-  const toggleFavorite = async (adId) => {
+  const toggleFavorite = useCallback(async (adId) => {
     if (!token) {
-      toast.error(t("error"), { description: "Please login first" });
+      toast.error(t("error"), { description: t("please_login_first") });
       return;
     }
 
@@ -69,14 +75,31 @@ const Home = () => {
       );
       toast.success(t("success"));
     } catch (error) {
-      toast.error(t("error"));
+      toast.error(t("error"), { description: t("failed_to_update_favorite") });
     }
-  };
+  }, [token, t]);
 
-  const handleCategoryClick = (categoryId) => {
+  const handleCategoryClick = useCallback((categoryId) => {
     setSelectedCategory(categoryId);
     navigate(`/?category=${categoryId}`);
-  };
+  }, [navigate]);
+
+  const handleClearCategory = useCallback(() => {
+    setSelectedCategory(null);
+    navigate("/");
+  }, [navigate]);
+
+  // Initial data fetch and re-fetch when search params change
+  useEffect(() => {
+    const loadData = async () => {
+      await Promise.all([
+        fetchCategories(),
+        fetchAds()
+      ]);
+    };
+
+    loadData();
+  }, [fetchCategories, fetchAds]);
 
   return (
     <div className="min-h-screen bg-white dark:bg-zinc-950">
@@ -151,10 +174,7 @@ const Home = () => {
           {selectedCategory && (
             <Button
               variant="outline"
-              onClick={() => {
-                setSelectedCategory(null);
-                navigate("/");
-              }}
+              onClick={handleClearCategory}
               data-testid="clear-category-btn"
             >
               {t("all_categories")}
