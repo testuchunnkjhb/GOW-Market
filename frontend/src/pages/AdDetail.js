@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -28,11 +28,9 @@ const AdDetail = () => {
   const [similarAds, setSimilarAds] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    fetchAd();
-  }, [id]);
-
-  const fetchAd = async () => {
+  const fetchAd = useCallback(async () => {
+    if (!id) return;
+    
     setLoading(true);
     try {
       const response = await axios.get(`${API}/ads/${id}`);
@@ -52,15 +50,19 @@ const AdDetail = () => {
       setSimilarAds(similarResponse.data.filter(a => a.id !== id));
     } catch (error) {
       console.error("Failed to fetch ad:", error);
-      toast.error(t("error"));
+      toast.error(t("error"), { description: t("failed_to_load_ad") });
     } finally {
       setLoading(false);
     }
-  };
+  }, [id, t]);
 
-  const toggleFavorite = async () => {
+  useEffect(() => {
+    fetchAd();
+  }, [fetchAd]);
+
+  const toggleFavorite = useCallback(async () => {
     if (!token) {
-      toast.error(t("error"), { description: "Please login first" });
+      toast.error(t("error"), { description: t("please_login_first") });
       return;
     }
 
@@ -72,17 +74,25 @@ const AdDetail = () => {
       );
       toast.success(t("success"));
     } catch (error) {
-      toast.error(t("error"));
+      toast.error(t("error"), { description: t("failed_to_update_favorite") });
     }
-  };
+  }, [token, id, t]);
 
-  const handleChat = () => {
+  const handleChat = useCallback(() => {
     if (!token) {
-      toast.error(t("error"), { description: "Please login first" });
+      toast.error(t("error"), { description: t("please_login_first") });
       return;
     }
-    navigate(`/messages?ad=${id}&user=${ad.user_id}`);
-  };
+    navigate(`/messages?ad=${id}&user=${ad?.user_id}`);
+  }, [token, id, ad?.user_id, navigate, t]);
+
+  const handleCall = useCallback((phoneNumber) => {
+    window.location.href = `tel:${phoneNumber}`;
+  }, []);
+
+  const handleNavigateToAd = useCallback((adId) => {
+    navigate(`/ad/${adId}`);
+  }, [navigate]);
 
   if (loading) {
     return (
@@ -100,7 +110,7 @@ const AdDetail = () => {
       <div className="min-h-screen bg-white dark:bg-zinc-950">
         <Header />
         <div className="max-w-7xl mx-auto px-4 py-12 text-center">
-          <div className="text-zinc-600 dark:text-zinc-400">Ad not found</div>
+          <div className="text-zinc-600 dark:text-zinc-400">{t("ad_not_found")}</div>
         </div>
       </div>
     );
@@ -143,7 +153,7 @@ const AdDetail = () => {
                 </Carousel>
               ) : (
                 <div className="h-96 flex items-center justify-center text-zinc-400">
-                  No images available
+                  {t("no_images")}
                 </div>
               )}
             </div>
@@ -242,7 +252,7 @@ const AdDetail = () => {
                 </div>
 
                 <div className="space-y-2 pt-4 border-t border-zinc-200 dark:border-zinc-800">
-                  {ad.contact_methods.includes("chat") && (
+                  {ad.contact_methods && ad.contact_methods.includes("chat") && (
                     <Button
                       onClick={handleChat}
                       className="w-full bg-red-600 hover:bg-red-700 text-white"
@@ -253,11 +263,11 @@ const AdDetail = () => {
                     </Button>
                   )}
                   
-                  {ad.contact_methods.includes("call") && (
+                  {ad.contact_methods && ad.contact_methods.includes("call") && (
                     <Button
                       variant="outline"
                       className="w-full"
-                      onClick={() => window.location.href = `tel:${ad.contact_phone}`}
+                      onClick={() => handleCall(ad.contact_phone)}
                       data-testid="call-btn"
                     >
                       <Phone className="w-4 h-4 mr-2" />
@@ -280,7 +290,7 @@ const AdDetail = () => {
               {similarAds.slice(0, 4).map((similarAd) => (
                 <div
                   key={similarAd.id}
-                  onClick={() => navigate(`/ad/${similarAd.id}`)}
+                  onClick={() => handleNavigateToAd(similarAd.id)}
                   className="border border-zinc-200 dark:border-zinc-800 rounded-lg overflow-hidden cursor-pointer hover:-translate-y-1 hover:shadow-lg transition"
                   data-testid={`similar-ad-${similarAd.id}`}
                 >
