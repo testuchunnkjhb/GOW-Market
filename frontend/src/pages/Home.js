@@ -7,7 +7,6 @@ import Header from "@/components/Header";
 import { Button } from "@/components/ui/button";
 import { Heart, Eye } from "lucide-react";
 import { toast } from "sonner";
-import { safeExtractArray } from "@/utils/apiHelpers";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -22,6 +21,56 @@ const Home = () => {
   const [loading, setLoading] = useState(true);
   const [selectedCategory, setSelectedCategory] = useState(null);
 
+  /**
+   * SAFE ARRAY NORMALIZATION
+   * Ensures we ALWAYS have an array, never null/undefined/object
+   * This prevents the "l.map is not a function" error
+   */
+  const toArray = (data) => {
+    // If it's already an array, return it
+    if (Array.isArray(data)) {
+      return data;
+    }
+    
+    // If it's null, undefined, or any falsy value, return empty array
+    if (!data) {
+      return [];
+    }
+    
+    // If it's an object, check for common API response patterns
+    if (typeof data === "object") {
+      // Check for nested data property (common in many APIs)
+      if (Array.isArray(data.data)) {
+        return data.data;
+      }
+      // Check for items property
+      if (Array.isArray(data.items)) {
+        return data.items;
+      }
+      // Check for results property
+      if (Array.isArray(data.results)) {
+        return data.results;
+      }
+      // Check for rows property
+      if (Array.isArray(data.rows)) {
+        return data.rows;
+      }
+      // Check for ads property (specific to ads endpoint)
+      if (Array.isArray(data.ads)) {
+        return data.ads;
+      }
+      // Check for categories property (specific to categories endpoint)
+      if (Array.isArray(data.categories)) {
+        return data.categories;
+      }
+      // If it's an object but none of the above, return empty array
+      return [];
+    }
+    
+    // For any other type (string, number, boolean), return empty array
+    return [];
+  };
+
   // Sync selectedCategory with URL params
   useEffect(() => {
     const categoryParam = searchParams.get("category");
@@ -35,12 +84,13 @@ const Home = () => {
   const fetchCategories = useCallback(async () => {
     try {
       const response = await axios.get(`${API}/categories`);
-      // Safely extract array from response
-      const categoriesArray = safeExtractArray(response.data);
+      // ALWAYS use toArray() to ensure we have an array
+      const categoriesArray = toArray(response.data);
       setCategories(categoriesArray);
     } catch (error) {
       console.error("Failed to fetch categories:", error);
       toast.error(t("error"), { description: t("failed_to_load_categories") });
+      // ALWAYS set to empty array on error
       setCategories([]);
     }
   }, [t]);
@@ -56,12 +106,13 @@ const Home = () => {
       if (category) params.append("category_id", category);
       
       const response = await axios.get(`${API}/ads?${params}`);
-      // Safely extract array from response
-      const adsArray = safeExtractArray(response.data);
+      // ALWAYS use toArray() to ensure we have an array
+      const adsArray = toArray(response.data);
       setAds(adsArray);
     } catch (error) {
       console.error("Failed to fetch ads:", error);
       toast.error(t("error"), { description: t("failed_to_load_ads") });
+      // ALWAYS set to empty array on error
       setAds([]);
     } finally {
       setLoading(false);
@@ -108,6 +159,119 @@ const Home = () => {
     loadData();
   }, [fetchCategories, fetchAds]);
 
+  // SAFE RENDER: categories.map() is ALWAYS protected
+  // categories is guaranteed to be an array by toArray()
+  // But we add extra protection with Array.isArray() for safety
+  const renderCategories = () => {
+    // Double protection: ensure it's an array before mapping
+    if (!Array.isArray(categories) || categories.length === 0) {
+      return (
+        <div className="col-span-full text-center py-8 text-zinc-600 dark:text-zinc-400">
+          {t("no_categories")}
+        </div>
+      );
+    }
+
+    return categories.map((category) => (
+      <button
+        key={category.id}
+        onClick={() => handleCategoryClick(category.id)}
+        className={`p-6 border rounded-lg transition hover:-translate-y-1 hover:shadow-lg ${
+          selectedCategory === category.id
+            ? "border-red-600 bg-red-50 dark:bg-red-950/20"
+            : "border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900"
+        }`}
+        data-testid={`category-${category.id}`}
+      >
+        <div className="text-center">
+          <div className="text-2xl mb-2">📦</div>
+          <div className="text-sm font-bold text-zinc-950 dark:text-white">
+            {language === "uz" ? category.name_uz : category.name_ru}
+          </div>
+        </div>
+      </button>
+    ));
+  };
+
+  // SAFE RENDER: ads.map() is ALWAYS protected
+  // ads is guaranteed to be an array by toArray()
+  // But we add extra protection with Array.isArray() for safety
+  const renderAds = () => {
+    // Double protection: ensure it's an array before mapping
+    if (!Array.isArray(ads) || ads.length === 0) {
+      return (
+        <div className="text-center py-12">
+          <div className="text-zinc-600 dark:text-zinc-400">{t("no_results")}</div>
+        </div>
+      );
+    }
+
+    return ads.map((ad) => (
+      <div
+        key={ad.id}
+        className="ad-card border border-zinc-200 dark:border-zinc-800 rounded-lg overflow-hidden bg-white dark:bg-zinc-900 hover:-translate-y-1 hover:shadow-lg transition"
+        data-testid={`ad-card-${ad.id}`}
+      >
+        <div
+          className="relative h-48 bg-zinc-100 dark:bg-zinc-800 overflow-hidden cursor-pointer"
+          onClick={() => navigate(`/ad/${ad.id}`)}
+        >
+          {/* SAFE: Check if ad.images exists and is an array before accessing */}
+          {ad.images && Array.isArray(ad.images) && ad.images.length > 0 ? (
+            <img
+              src={`${API}/files/${ad.images[0]}`}
+              alt={ad.title}
+              className="w-full h-full object-cover"
+              onError={(e) => {
+                e.target.src = "https://images.pexels.com/photos/19439173/pexels-photo-19439173.jpeg";
+              }}
+            />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center text-zinc-400">
+              {t("no_image")}
+            </div>
+          )}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleFavorite(ad.id);
+            }}
+            className="absolute top-3 right-3 p-2 bg-white/90 dark:bg-zinc-900/90 rounded-full hover:bg-white dark:hover:bg-zinc-900 transition"
+            data-testid={`favorite-btn-${ad.id}`}
+          >
+            <Heart className="w-4 h-4 text-zinc-700 dark:text-zinc-300" />
+          </button>
+        </div>
+        <div className="p-4">
+          <h3
+            className="font-bold text-zinc-950 dark:text-white mb-2 line-clamp-2 cursor-pointer hover:text-red-600 transition"
+            onClick={() => navigate(`/ad/${ad.id}`)}
+            data-testid={`ad-title-${ad.id}`}
+          >
+            {ad.title}
+          </h3>
+          {/* SAFE: Check if price exists and is a number before formatting */}
+          {ad.price != null && !isNaN(ad.price) && (
+            <div className="text-xl font-black text-red-600 mb-2">
+              {new Intl.NumberFormat('uz-UZ').format(ad.price)} UZS
+            </div>
+          )}
+          <div className="flex items-center justify-between text-sm text-zinc-600 dark:text-zinc-400">
+            <div className="flex items-center gap-1">
+              <Eye className="w-4 h-4" />
+              {/* SAFE: Use optional chaining and fallback */}
+              <span>{ad.views || 0}</span>
+            </div>
+            <div className="text-xs">
+              {/* SAFE: Use optional chaining and fallback */}
+              {ad.location?.address || "Samarqand"}
+            </div>
+          </div>
+        </div>
+      </div>
+    ));
+  };
+
   return (
     <div className="min-h-screen bg-white dark:bg-zinc-950">
       <Header />
@@ -150,31 +314,7 @@ const Home = () => {
           {t("categories")}
         </h2>
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
-          {Array.isArray(categories) && categories.length > 0 ? (
-            categories.map((category) => (
-              <button
-                key={category.id}
-                onClick={() => handleCategoryClick(category.id)}
-                className={`p-6 border rounded-lg transition hover:-translate-y-1 hover:shadow-lg ${
-                  selectedCategory === category.id
-                    ? "border-red-600 bg-red-50 dark:bg-red-950/20"
-                    : "border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900"
-                }`}
-                data-testid={`category-${category.id}`}
-              >
-                <div className="text-center">
-                  <div className="text-2xl mb-2">📦</div>
-                  <div className="text-sm font-bold text-zinc-950 dark:text-white">
-                    {language === "uz" ? category.name_uz : category.name_ru}
-                  </div>
-                </div>
-              </button>
-            ))
-          ) : (
-            <div className="col-span-full text-center py-8 text-zinc-600 dark:text-zinc-400">
-              {t("no_categories")}
-            </div>
-          )}
+          {renderCategories()}
         </div>
       </div>
 
@@ -199,72 +339,9 @@ const Home = () => {
           <div className="text-center py-12">
             <div className="text-zinc-600 dark:text-zinc-400">{t("loading")}</div>
           </div>
-        ) : !Array.isArray(ads) || ads.length === 0 ? (
-          <div className="text-center py-12">
-            <div className="text-zinc-600 dark:text-zinc-400">{t("no_results")}</div>
-          </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-            {ads.map((ad) => (
-              <div
-                key={ad.id}
-                className="ad-card border border-zinc-200 dark:border-zinc-800 rounded-lg overflow-hidden bg-white dark:bg-zinc-900 hover:-translate-y-1 hover:shadow-lg transition"
-                data-testid={`ad-card-${ad.id}`}
-              >
-                <div
-                  className="relative h-48 bg-zinc-100 dark:bg-zinc-800 overflow-hidden cursor-pointer"
-                  onClick={() => navigate(`/ad/${ad.id}`)}
-                >
-                  {ad.images && Array.isArray(ad.images) && ad.images.length > 0 ? (
-                    <img
-                      src={`${API}/files/${ad.images[0]}`}
-                      alt={ad.title}
-                      className="w-full h-full object-cover"
-                      onError={(e) => {
-                        e.target.src = "https://images.pexels.com/photos/19439173/pexels-photo-19439173.jpeg";
-                      }}
-                    />
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center text-zinc-400">
-                      {t("no_image")}
-                    </div>
-                  )}
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toggleFavorite(ad.id);
-                    }}
-                    className="absolute top-3 right-3 p-2 bg-white/90 dark:bg-zinc-900/90 rounded-full hover:bg-white dark:hover:bg-zinc-900 transition"
-                    data-testid={`favorite-btn-${ad.id}`}
-                  >
-                    <Heart className="w-4 h-4 text-zinc-700 dark:text-zinc-300" />
-                  </button>
-                </div>
-                <div className="p-4">
-                  <h3
-                    className="font-bold text-zinc-950 dark:text-white mb-2 line-clamp-2 cursor-pointer hover:text-red-600 transition"
-                    onClick={() => navigate(`/ad/${ad.id}`)}
-                    data-testid={`ad-title-${ad.id}`}
-                  >
-                    {ad.title}
-                  </h3>
-                  {ad.price != null && (
-                    <div className="text-xl font-black text-red-600 mb-2">
-                      {new Intl.NumberFormat('uz-UZ').format(ad.price)} UZS
-                    </div>
-                  )}
-                  <div className="flex items-center justify-between text-sm text-zinc-600 dark:text-zinc-400">
-                    <div className="flex items-center gap-1">
-                      <Eye className="w-4 h-4" />
-                      <span>{ad.views || 0}</span>
-                    </div>
-                    <div className="text-xs">
-                      {ad.location?.address || "Samarqand"}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            ))}
+            {renderAds()}
           </div>
         )}
       </div>
