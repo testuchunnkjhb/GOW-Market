@@ -6,6 +6,7 @@ import axios from "axios";
 import Header from "@/components/Header";
 import { Eye } from "lucide-react";
 import { toast } from "sonner";
+import { safeExtractArray } from "@/utils/apiHelpers";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -23,9 +24,13 @@ const Favorites = () => {
       const response = await axios.get(`${API}/favorites`, {
         headers: { Authorization: `Bearer ${token}` }
       });
-      setFavorites(response.data);
+      // Safely extract array from response (handles { data: [...] } or [...])
+      const favoritesArray = safeExtractArray(response.data);
+      setFavorites(favoritesArray);
     } catch (error) {
+      console.error("Failed to fetch favorites:", error);
       toast.error(t("error"));
+      setFavorites([]);
     } finally {
       setLoading(false);
     }
@@ -54,7 +59,7 @@ const Favorites = () => {
           <div className="text-center py-12 text-zinc-600 dark:text-zinc-400">
             {t("loading")}
           </div>
-        ) : favorites.length === 0 ? (
+        ) : !Array.isArray(favorites) || favorites.length === 0 ? (
           <div className="text-center py-12 text-zinc-600 dark:text-zinc-400">
             {t("no_results")}
           </div>
@@ -68,7 +73,7 @@ const Favorites = () => {
                 data-testid={`favorite-ad-${ad.id}`}
               >
                 <div className="relative h-48 bg-zinc-100 dark:bg-zinc-800">
-                  {ad.images && ad.images.length > 0 ? (
+                  {ad.images && Array.isArray(ad.images) && ad.images.length > 0 ? (
                     <img
                       src={`${API}/files/${ad.images[0]}`}
                       alt={ad.title}
