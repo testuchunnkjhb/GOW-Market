@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -17,17 +17,7 @@ const Favorites = () => {
   const [favorites, setFavorites] = useState([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    if (authLoading) return;
-    
-    if (!token) {
-      navigate("/");
-      return;
-    }
-    fetchFavorites();
-  }, [token, authLoading, navigate]);
-
-  const fetchFavorites = async () => {
+  const fetchFavorites = useCallback(async () => {
     setLoading(true);
     try {
       const response = await axios.get(`${API}/favorites`, {
@@ -39,7 +29,17 @@ const Favorites = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [token, t]);
+
+  useEffect(() => {
+    if (authLoading) return;
+    
+    if (!token) {
+      navigate("/");
+      return;
+    }
+    fetchFavorites();
+  }, [token, authLoading, navigate, fetchFavorites]);
 
   return (
     <div className="min-h-screen bg-white dark:bg-zinc-950">
