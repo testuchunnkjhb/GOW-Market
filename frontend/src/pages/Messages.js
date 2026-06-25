@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Send } from "lucide-react";
 import { toast } from "sonner";
+import { safeExtractArray } from "@/utils/apiHelpers";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -29,9 +30,13 @@ const Messages = () => {
       const response = await axios.get(`${API}/messages/conversations`, {
         headers: { Authorization: `Bearer ${token}` }
       });
-      setConversations(response.data);
+      // Safely extract array from response
+      const conversationsArray = safeExtractArray(response.data);
+      setConversations(conversationsArray);
     } catch (error) {
+      console.error("Failed to fetch conversations:", error);
       toast.error(t("error"));
+      setConversations([]);
     } finally {
       setLoading(false);
     }
@@ -44,9 +49,13 @@ const Messages = () => {
         `${API}/messages/${conversation.user.id}?ad_id=${conversation.ad.id}`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
-      setMessages(response.data);
+      // Safely extract array from response
+      const messagesArray = safeExtractArray(response.data);
+      setMessages(messagesArray);
     } catch (error) {
+      console.error("Failed to fetch messages:", error);
       toast.error(t("error"));
+      setMessages([]);
     }
   }, [token, t]);
 
@@ -64,7 +73,7 @@ const Messages = () => {
     const adId = searchParams.get("ad");
     const userId = searchParams.get("user");
     
-    if (adId && userId && conversations.length > 0) {
+    if (adId && userId && Array.isArray(conversations) && conversations.length > 0) {
       const conv = conversations.find(c => c.ad?.id === adId && c.user?.id === userId);
       if (conv) {
         selectConversation(conv);
@@ -90,6 +99,7 @@ const Messages = () => {
       setMessages([...messages, response.data]);
       setNewMessage("");
     } catch (error) {
+      console.error("Failed to send message:", error);
       toast.error(t("error"));
     }
   };
@@ -118,7 +128,7 @@ const Messages = () => {
                 <div className="p-4 text-center text-zinc-600 dark:text-zinc-400">
                   {t("loading")}
                 </div>
-              ) : conversations.length === 0 ? (
+              ) : !Array.isArray(conversations) || conversations.length === 0 ? (
                 <div className="p-4 text-center text-zinc-600 dark:text-zinc-400">
                   {t("no_results")}
                 </div>
@@ -163,7 +173,7 @@ const Messages = () => {
 
                 {/* Messages */}
                 <div className="flex-1 overflow-y-auto p-4 space-y-4" data-testid="messages-container">
-                  {messages.map((msg) => (
+                  {Array.isArray(messages) && messages.map((msg) => (
                     <div
                       key={msg.id}
                       className={`flex ${msg.sender_id === user.id ? "justify-end" : "justify-start"}`}
