@@ -1,682 +1,1239 @@
-from fastapi import FastAPI, APIRouter, HTTPException, UploadFile, File, Header, Query, Depends
-from fastapi.responses import Response
-from dotenv import load_dotenv
-from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Form, Request, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, FileResponse
+from fastapi.middleware.trustedhost import TrustedHostMiddleware
+from pydantic import BaseModel, Field, validator, EmailStr
+from typing import Optional, List, Dict, Any
+from datetime import datetime, timedelta
+from bson import ObjectId
+from pymongo import MongoClient, ASCENDING, DESCENDING, IndexModel
+from pymongo.errors import PyMongoError, DuplicateKeyError
+import motor.motor_asyncio
+import jwt
+import bcrypt
 import os
-import logging
-from pathlib import Path
-from pydantic import BaseModel, Field, ConfigDict
-from typing import List, Optional
+import shutil
 import uuid
-from datetime import datetime, timezone, timedelta
-import requests
-import random
-import hashlib
+import time
+import re
 import json
-from passlib.context import CryptContext
-import pytz
+from collections import defaultdict
+from functools import wraps
+import asyncio
+from pathlib import Path
+import hashlib
+from PIL import Image
 
-# Password hashing
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# ==================== CONFIGURATION ====================
+SECRET_KEY = os.getenv("JWT_SECRET", "your-super-secret-jwt-key-change-in-production")
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 7 days
+REFRESH_TOKEN_EXPIRE_DAYS = 30
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+ALLOWED_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
+RATE_LIMIT_REQUESTS = 60
+RATE_LIMIT_WINDOW = 60  # seconds
 
-# Timezone
-TASHKENT_TZ = pytz.timezone('Asia/Tashkent')
+# ==================== MONGODB CONNECTION ====================
+MONGO_URL = os.getenv("MONGO_URL", "mongodb://localhost:27017")
+DB_NAME = os.getenv("DB_NAME", "gow_market")
 
-# Pricing constants
-AD_PRICE = 4999  # UZS
-AD_PRICE_FRIDAY = 2499  # 50% discount on Fridays
+client = motor.motor_asyncio.AsyncIOMotorClient(MONGO_URL)
+db = client[DB_NAME]
 
-def get_current_ad_price():
-    """Calculate current ad price based on day of week (Tashkent time)"""
-    now = datetime.now(TASHKENT_TZ)
-    # Friday = 4 (Monday is 0)
-    if now.weekday() == 4:
-        return AD_PRICE_FRIDAY
-    return AD_PRICE
+# Collections
+ads_collection = db["ads"]
+users_collection = db["users"]
+categories_collection = db["categories"]
+favorites_collection = db["favorites"]
+messages_collection = db["messages"]
 
-def hash_password(password: str) -> str:
-    return pwd_context.hash(password)
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
-
-ROOT_DIR = Path(__file__).parent
-load_dotenv(ROOT_DIR / '.env')
-
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
-
-# Object Storage Configuration
-STORAGE_URL = "https://integrations.emergentagent.com/objstore/api/v1/storage"
-EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")
-APP_NAME = "gowmarket"
-storage_key = None
-
-def init_storage():
-    global storage_key
-    if storage_key:
-        return storage_key
+# ==================== INDEXES ====================
+async def create_indexes():
+    """Create indexes for performance optimization"""
     try:
-        resp = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_KEY}, timeout=30)
-        resp.raise_for_status()
-        storage_key = resp.json()["storage_key"]
-        return storage_key
+        # Ads indexes
+        await ads_collection.create_index([("category_id", ASCENDING)])
+        await ads_collection.create_index([("created_at", DESCENDING)])
+        await ads_collection.create_index([("status", ASCENDING)])
+        await ads_collection.create_index([("user_id", ASCENDING)])
+        await ads_collection.create_index([("created_at", DESCENDING), ("status", ASCENDING)])
+        
+        # Users indexes
+        await users_collection.create_index([("phone", ASCENDING)], unique=True)
+        await users_collection.create_index([("email", ASCENDING)], unique=True)
+        
+        # Favorites indexes
+        await favorites_collection.create_index([("user_id", ASCENDING), ("ad_id", ASCENDING)], unique=True)
+        
+        # Messages indexes
+        await messages_collection.create_index([("sender_id", ASCENDING)])
+        await messages_collection.create_index([("receiver_id", ASCENDING)])
+        await messages_collection.create_index([("ad_id", ASCENDING)])
+        await messages_collection.create_index([("created_at", DESCENDING)])
+        
+        # Categories indexes
+        await categories_collection.create_index([("name_uz", ASCENDING)])
+        await categories_collection.create_index([("name_ru", ASCENDING)])
+        
+        print("✅ Indexes created successfully")
     except Exception as e:
-        logging.error(f"Storage init failed: {e}")
+        print(f"⚠️ Index creation error: {e}")
+
+# ==================== SAFE HELPERS ====================
+def safe_id(id_str: str) -> Optional[ObjectId]:
+    """Safely convert string to ObjectId"""
+    if not id_str:
+        return None
+    try:
+        return ObjectId(id_str)
+    except:
+        return None
+
+def safe_mongo_doc(doc: Optional[Dict]) -> Optional[Dict]:
+    """Safely convert MongoDB document to dict with string IDs"""
+    if not doc:
+        return None
+    if "_id" in doc:
+        doc["id"] = str(doc.pop("_id"))
+    return doc
+
+def safe_mongo_list(docs: Optional[List]) -> List[Dict]:
+    """Safely convert MongoDB cursor/list to list of dicts with string IDs"""
+    if not docs:
+        return []
+    result = []
+    try:
+        for doc in docs:
+            if doc:
+                doc_copy = dict(doc)
+                if "_id" in doc_copy:
+                    doc_copy["id"] = str(doc_copy.pop("_id"))
+                result.append(doc_copy)
+    except Exception:
+        return []
+    return result
+
+def safe_str(value: Any, default: str = "") -> str:
+    """Safely convert value to string"""
+    if value is None:
+        return default
+    try:
+        return str(value)
+    except:
+        return default
+
+def safe_int(value: Any, default: int = 0) -> int:
+    """Safely convert value to int"""
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except:
+        return default
+
+def safe_float(value: Any, default: float = 0.0) -> float:
+    """Safely convert value to float"""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except:
+        return default
+
+def safe_bool(value: Any, default: bool = False) -> bool:
+    """Safely convert value to bool"""
+    if value is None:
+        return default
+    try:
+        return bool(value)
+    except:
+        return default
+
+def safe_datetime(dt: Any) -> Optional[datetime]:
+    """Safely convert to datetime"""
+    if dt is None:
+        return None
+    if isinstance(dt, datetime):
+        return dt
+    if isinstance(dt, str):
+        try:
+            return datetime.fromisoformat(dt)
+        except:
+            return None
+    return None
+
+def safe_now() -> datetime:
+    """Get current datetime safely"""
+    try:
+        return datetime.utcnow()
+    except:
+        return datetime.now()
+
+def safe_list(data: Any) -> List:
+    """Safely convert to list"""
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        return list(data.values())
+    try:
+        return list(data)
+    except:
+        return []
+
+def safe_dict(data: Any) -> Dict:
+    """Safely convert to dict"""
+    if data is None:
+        return {}
+    if isinstance(data, dict):
+        return data
+    try:
+        return dict(data)
+    except:
+        return {}
+
+def safe_get(data: Dict, key: str, default: Any = None) -> Any:
+    """Safely get value from dict with default"""
+    if not isinstance(data, dict):
+        return default
+    return data.get(key, default)
+
+def safe_find_one(collection, filter_dict: Dict) -> Optional[Dict]:
+    """Safely find one document"""
+    try:
+        doc = await collection.find_one(filter_dict)
+        return safe_mongo_doc(doc)
+    except:
+        return None
+
+def safe_find(collection, filter_dict: Dict, **kwargs) -> List[Dict]:
+    """Safely find documents"""
+    try:
+        cursor = collection.find(filter_dict, **kwargs)
+        docs = await cursor.to_list(length=None)
+        return safe_mongo_list(docs)
+    except:
+        return []
+
+def safe_insert_one(collection, document: Dict) -> Optional[str]:
+    """Safely insert one document"""
+    try:
+        result = await collection.insert_one(document)
+        return str(result.inserted_id) if result.inserted_id else None
+    except:
+        return None
+
+def safe_update_one(collection, filter_dict: Dict, update_dict: Dict) -> bool:
+    """Safely update one document"""
+    try:
+        result = await collection.update_one(filter_dict, update_dict)
+        return result.modified_count > 0
+    except:
+        return False
+
+def safe_delete_one(collection, filter_dict: Dict) -> bool:
+    """Safely delete one document"""
+    try:
+        result = await collection.delete_one(filter_dict)
+        return result.deleted_count > 0
+    except:
+        return False
+
+# ==================== RATE LIMITING ====================
+rate_limit_store = defaultdict(list)
+
+async def rate_limit_middleware(request: Request, call_next):
+    """Rate limiting middleware - 60 requests per minute per IP"""
+    client_ip = request.client.host if request.client else "unknown"
+    now = time.time()
+    
+    # Clean old requests
+    rate_limit_store[client_ip] = [
+        req_time for req_time in rate_limit_store[client_ip]
+        if now - req_time < RATE_LIMIT_WINDOW
+    ]
+    
+    # Check rate limit
+    if len(rate_limit_store[client_ip]) >= RATE_LIMIT_REQUESTS:
+        return JSONResponse(
+            status_code=429,
+            content={"success": False, "error": "Too many requests. Please try again later."}
+        )
+    
+    # Add current request
+    rate_limit_store[client_ip].append(now)
+    
+    # Process request
+    response = await call_next(request)
+    return response
+
+# ==================== LOGGING MIDDLEWARE ====================
+async def logging_middleware(request: Request, call_next):
+    """Request logging middleware"""
+    start_time = time.time()
+    
+    # Get request details
+    method = request.method
+    path = request.url.path
+    client_ip = request.client.host if request.client else "unknown"
+    
+    # Process request
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+    except Exception as e:
+        status_code = 500
         raise
-
-def put_object(path: str, data: bytes, content_type: str) -> dict:
-    key = init_storage()
-    resp = requests.put(
-        f"{STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key, "Content-Type": content_type},
-        data=data, timeout=120
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-def get_object(path: str) -> tuple:
-    key = init_storage()
-    resp = requests.get(
-        f"{STORAGE_URL}/objects/{path}",
-        headers={"X-Storage-Key": key}, timeout=60
-    )
-    resp.raise_for_status()
-    return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
-
-app = FastAPI()
-api_router = APIRouter(prefix="/api")
-
-# Models
-class UserCreate(BaseModel):
-    phone: str
-    name: str
-    password: str
-
-class UserLogin(BaseModel):
-    phone: str
-    password: str
-
-class User(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str
-    phone: str
-    name: str
-    role: str = "user"
-    created_at: str
-
-class SendOTPRequest(BaseModel):
-    phone: str
-
-class VerifyOTPRequest(BaseModel):
-    phone: str
-    code: str
-
-class OTPVerification(BaseModel):
-    phone: str
-    code: str
-    verified: bool
-    expires_at: str
-
-class Category(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str
-    name_uz: str
-    name_ru: str
-    icon: str
-
-class AdCreate(BaseModel):
-    title: str
-    category_id: str
-    price: Optional[float] = None
-    description: str
-    location: dict
-    contact_name: str
-    contact_phone: str
-    contact_methods: List[str]
-    can_deliver: bool = False
-    characteristics: Optional[dict] = None
-
-class Ad(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str
-    user_id: str
-    title: str
-    category_id: str
-    price: Optional[float]
-    description: str
-    images: List[str]
-    location: dict
-    contact_name: str
-    contact_phone: str
-    contact_methods: List[str]
-    can_deliver: bool
-    characteristics: Optional[dict]
-    status: str
-    views: int
-    created_at: str
-    updated_at: str
-
-class Message(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str
-    ad_id: str
-    sender_id: str
-    receiver_id: str
-    content: str
-    created_at: str
-    read: bool
-
-class MessageCreate(BaseModel):
-    ad_id: str
-    receiver_id: str
-    content: str
-
-class FavoriteToggle(BaseModel):
-    ad_id: str
-
-class AdminAction(BaseModel):
-    ad_id: str
-    action: str
-
-class PaymentCreate(BaseModel):
-    ad_id: str
-    amount: float
-    payment_method: str  # "click"
-
-class Payment(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    id: str
-    ad_id: str
-    user_id: str
-    amount: float
-    payment_method: str
-    status: str  # pending, completed, failed
-    transaction_id: Optional[str]
-    created_at: str
-    completed_at: Optional[str]
-
-# Auth Helper
-async def get_current_user(authorization: str = Header(None)) -> dict:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail="Not authenticated")
     
-    token = authorization.replace("Bearer ", "")
-    user = await db.users.find_one({"id": token}, {"_id": 0, "password": 0})
+    # Calculate duration
+    duration = (time.time() - start_time) * 1000
     
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid token")
+    # Log
+    print(f"[{datetime.now().isoformat()}] {method} {path} | {status_code} | {duration:.2f}ms | IP: {client_ip}")
     
+    return response
+
+# ==================== JWT AUTH ====================
+def create_access_token(data: Dict, expires_delta: Optional[timedelta] = None) -> str:
+    """Create JWT access token"""
+    to_encode = data.copy()
+    if expires_delta:
+        expire = safe_now() + expires_delta
+    else:
+        expire = safe_now() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    try:
+        encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+        return encoded_jwt
+    except:
+        return None
+
+def verify_token(token: str) -> Optional[Dict]:
+    """Verify JWT token"""
+    if not token:
+        return None
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+    except:
+        return None
+
+async def get_current_user(token: Optional[str] = None) -> Optional[Dict]:
+    """Get current user from token"""
+    if not token:
+        return None
+    
+    # Remove "Bearer " prefix if present
+    if token.startswith("Bearer "):
+        token = token[7:]
+    
+    payload = verify_token(token)
+    if not payload:
+        return None
+    
+    user_id = safe_get(payload, "sub")
+    if not user_id:
+        return None
+    
+    # Get user from database
+    user = await safe_find_one(users_collection, {"_id": safe_id(user_id)})
     return user
 
-# Auth Endpoints
-@api_router.post("/auth/register", response_model=User)
-async def register(user_data: UserCreate):
-    # Validate Uzbekistan phone number
-    if not user_data.phone.startswith("+998") or len(user_data.phone) != 13:
-        raise HTTPException(status_code=400, detail="Invalid Uzbekistan phone number. Format: +998 XX XXX XX XX")
-    
-    existing = await db.users.find_one({"phone": user_data.phone})
-    if existing:
-        raise HTTPException(status_code=400, detail="User already exists")
-    
-    user_id = str(uuid.uuid4())
-    hashed_password = hash_password(user_data.password)
-    
-    user = {
-        "id": user_id,
-        "phone": user_data.phone,
-        "name": user_data.name,
-        "password": hashed_password,
-        "role": "user",
-        "created_at": datetime.now(timezone.utc).isoformat()
-    }
-    
-    await db.users.insert_one(user)
-    
-    # Don't return password
-    user_response = {k: v for k, v in user.items() if k != "password"}
-    return User(**user_response)
+async def get_current_user_optional(request: Request) -> Optional[Dict]:
+    """Get current user from request header (optional)"""
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+        return None
+    return await get_current_user(auth_header)
 
-@api_router.post("/auth/login")
-async def login(credentials: UserLogin):
-    user = await db.users.find_one({"phone": credentials.phone}, {"_id": 0})
-    
-    if not user or not user.get("password"):
-        raise HTTPException(status_code=401, detail="Invalid phone or password")
-    
-    if not verify_password(credentials.password, user["password"]):
-        raise HTTPException(status_code=401, detail="Invalid phone or password")
-    
-    # Return user without password
-    user_response = {k: v for k, v in user.items() if k != "password"}
-    return {
-        "user": user_response,
-        "token": user["id"]
-    }
+async def get_current_user_required(request: Request) -> Dict:
+    """Get current user from request header (required)"""
+    user = await get_current_user_optional(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    return user
 
-@api_router.get("/auth/me", response_model=User)
-async def get_me(current_user: dict = Depends(get_current_user)):
-    return User(**current_user)
+# ==================== PYDANTIC MODELS ====================
+class UserCreate(BaseModel):
+    phone: str = Field(..., min_length=5, max_length=20, description="Phone number")
+    password: str = Field(..., min_length=6, max_length=100)
+    name: str = Field(..., min_length=1, max_length=100)
+    email: Optional[str] = Field(None, max_length=100)
+    role: Optional[str] = Field("user", pattern="^(user|admin)$")
+    
+    @validator('phone')
+    def validate_phone(cls, v):
+        if not v or len(v.strip()) < 5:
+            raise ValueError('Phone number is too short')
+        return v.strip()
+    
+    @validator('email')
+    def validate_email(cls, v):
+        if v and '@' not in v:
+            raise ValueError('Invalid email format')
+        return v
 
-# Category Endpoints
-@api_router.get("/categories", response_model=List[Category])
-async def get_categories():
-    categories = await db.categories.find({}, {"_id": 0}).to_list(100)
-    return categories
+class UserLogin(BaseModel):
+    phone: str = Field(..., min_length=5, max_length=20)
+    password: str = Field(..., min_length=6, max_length=100)
 
-# Ad Endpoints
-@api_router.post("/ads", response_model=Ad)
-async def create_ad(ad_data: AdCreate, current_user: dict = Depends(get_current_user)):
-    ad_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
+class AdCreate(BaseModel):
+    title: str = Field(..., min_length=3, max_length=200)
+    description: str = Field(..., min_length=5, max_length=5000)
+    price: Optional[float] = Field(None, ge=0, le=999999999999)
+    category_id: str = Field(..., min_length=1)
+    contact_name: str = Field(..., min_length=1, max_length=100)
+    contact_phone: str = Field(..., min_length=5, max_length=20)
+    contact_methods: List[str] = Field(default=["chat", "call"])
+    location: Optional[Dict] = Field(default_factory=dict)
+    can_deliver: bool = Field(default=False)
+    characteristics: Optional[Dict] = Field(default_factory=dict)
     
-    ad = {
-        "id": ad_id,
-        "user_id": current_user["id"],
-        "title": ad_data.title,
-        "category_id": ad_data.category_id,
-        "price": ad_data.price,
-        "description": ad_data.description,
-        "images": [],
-        "location": ad_data.location,
-        "contact_name": ad_data.contact_name,
-        "contact_phone": ad_data.contact_phone,
-        "contact_methods": ad_data.contact_methods,
-        "can_deliver": ad_data.can_deliver,
-        "characteristics": ad_data.characteristics,
-        "status": "pending",
-        "views": 0,
-        "created_at": now,
-        "updated_at": now
-    }
+    @validator('category_id')
+    def validate_category_id(cls, v):
+        if not safe_id(v):
+            raise ValueError('Invalid category ID')
+        return v
     
-    await db.ads.insert_one(ad)
-    return Ad(**ad)
+    @validator('contact_phone')
+    def validate_contact_phone(cls, v):
+        if not v or len(v.strip()) < 5:
+            raise ValueError('Phone number is too short')
+        return v.strip()
 
-@api_router.post("/ads/{ad_id}/upload")
-async def upload_ad_image(ad_id: str, file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
-    ad = await db.ads.find_one({"id": ad_id, "user_id": current_user["id"]}, {"_id": 0})
-    if not ad:
-        raise HTTPException(status_code=404, detail="Ad not found")
+class AdUpdate(BaseModel):
+    title: Optional[str] = Field(None, min_length=3, max_length=200)
+    description: Optional[str] = Field(None, min_length=5, max_length=5000)
+    price: Optional[float] = Field(None, ge=0, le=999999999999)
+    category_id: Optional[str] = Field(None, min_length=1)
+    contact_name: Optional[str] = Field(None, min_length=1, max_length=100)
+    contact_phone: Optional[str] = Field(None, min_length=5, max_length=20)
+    contact_methods: Optional[List[str]] = None
+    location: Optional[Dict] = None
+    can_deliver: Optional[bool] = None
+    characteristics: Optional[Dict] = None
+    status: Optional[str] = Field(None, pattern="^(active|inactive|sold)$")
     
-    if len(ad.get("images", [])) >= 10:
-        raise HTTPException(status_code=400, detail="Maximum 10 images allowed")
-    
-    ext = file.filename.split(".")[-1] if "." in file.filename else "jpg"
-    path = f"{APP_NAME}/ads/{ad_id}/{uuid.uuid4()}.{ext}"
-    data = await file.read()
-    
-    if len(data) > 16 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File too large (max 16MB)")
-    
-    result = put_object(path, data, file.content_type or "image/jpeg")
-    
-    await db.ads.update_one(
-        {"id": ad_id},
-        {"$push": {"images": result["path"]}}
-    )
-    
-    return {"path": result["path"], "size": result["size"]}
+    @validator('category_id')
+    def validate_category_id(cls, v):
+        if v and not safe_id(v):
+            raise ValueError('Invalid category ID')
+        return v
 
-@api_router.get("/files/{path:path}")
-async def download_file(path: str):
-    try:
-        data, content_type = get_object(path)
-        return Response(content=data, media_type=content_type)
-    except:
-        raise HTTPException(status_code=404, detail="File not found")
+class CategoryCreate(BaseModel):
+    name_uz: str = Field(..., min_length=1, max_length=100)
+    name_ru: str = Field(..., min_length=1, max_length=100)
+    icon: Optional[str] = Field(None, max_length=50)
+    order: Optional[int] = Field(0, ge=0)
 
-@api_router.get("/ads", response_model=List[Ad])
-async def get_ads(
-    category_id: Optional[str] = None,
-    search: Optional[str] = None,
-    status: str = "active",
-    limit: int = 20,
-    skip: int = 0
-):
-    query = {"status": status}
+class FavoriteToggle(BaseModel):
+    ad_id: str = Field(..., min_length=1)
     
-    if category_id:
-        query["category_id"] = category_id
-    
-    if search:
-        query["title"] = {"$regex": search, "$options": "i"}
-    
-    ads = await db.ads.find(query, {"_id": 0}).sort("created_at", -1).skip(skip).limit(limit).to_list(limit)
-    return ads
+    @validator('ad_id')
+    def validate_ad_id(cls, v):
+        if not safe_id(v):
+            raise ValueError('Invalid ad ID')
+        return v
 
-@api_router.get("/ads/{ad_id}", response_model=Ad)
-async def get_ad(ad_id: str):
-    ad = await db.ads.find_one({"id": ad_id}, {"_id": 0})
-    if not ad:
-        raise HTTPException(status_code=404, detail="Ad not found")
+class MessageCreate(BaseModel):
+    ad_id: str = Field(..., min_length=1)
+    receiver_id: str = Field(..., min_length=1)
+    text: str = Field(..., min_length=1, max_length=5000)
     
-    await db.ads.update_one({"id": ad_id}, {"$inc": {"views": 1}})
-    
-    return Ad(**ad)
+    @validator('ad_id', 'receiver_id')
+    def validate_ids(cls, v):
+        if not safe_id(v):
+            raise ValueError('Invalid ID')
+        return v
 
-@api_router.get("/users/me/ads", response_model=List[Ad])
-async def get_my_ads(current_user: dict = Depends(get_current_user)):
-    ads = await db.ads.find({"user_id": current_user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(100)
-    return ads
+# ==================== API ROUTES ====================
+app = FastAPI(
+    title="GOW Market API",
+    version="1.0.0",
+    description="Production-ready marketplace API"
+)
 
-# Favorites
-@api_router.post("/favorites/toggle")
-async def toggle_favorite(data: FavoriteToggle, current_user: dict = Depends(get_current_user)):
-    existing = await db.favorites.find_one({
-        "user_id": current_user["id"],
-        "ad_id": data.ad_id
-    })
-    
-    if existing:
-        await db.favorites.delete_one({"user_id": current_user["id"], "ad_id": data.ad_id})
-        return {"favorited": False}
-    else:
-        await db.favorites.insert_one({
-            "id": str(uuid.uuid4()),
-            "user_id": current_user["id"],
-            "ad_id": data.ad_id,
-            "created_at": datetime.now(timezone.utc).isoformat()
-        })
-        return {"favorited": True}
-
-@api_router.get("/favorites", response_model=List[Ad])
-async def get_favorites(current_user: dict = Depends(get_current_user)):
-    favorites = await db.favorites.find({"user_id": current_user["id"]}, {"_id": 0}).to_list(100)
-    ad_ids = [f["ad_id"] for f in favorites]
-    
-    if not ad_ids:
-        return []
-    
-    ads = await db.ads.find({"id": {"$in": ad_ids}}, {"_id": 0}).to_list(100)
-    return ads
-
-# Messages
-@api_router.post("/messages", response_model=Message)
-async def send_message(msg_data: MessageCreate, current_user: dict = Depends(get_current_user)):
-    msg_id = str(uuid.uuid4())
-    message = {
-        "id": msg_id,
-        "ad_id": msg_data.ad_id,
-        "sender_id": current_user["id"],
-        "receiver_id": msg_data.receiver_id,
-        "content": msg_data.content,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "read": False
-    }
-    
-    await db.messages.insert_one(message)
-    return Message(**message)
-
-@api_router.get("/messages/conversations")
-async def get_conversations(current_user: dict = Depends(get_current_user)):
-    messages = await db.messages.find({
-        "$or": [
-            {"sender_id": current_user["id"]},
-            {"receiver_id": current_user["id"]}
-        ]
-    }, {"_id": 0}).sort("created_at", -1).to_list(100)
-    
-    # Collect unique IDs to avoid N+1 queries
-    user_ids = set()
-    ad_ids = set()
-    for msg in messages:
-        other_user_id = msg["receiver_id"] if msg["sender_id"] == current_user["id"] else msg["sender_id"]
-        user_ids.add(other_user_id)
-        ad_ids.add(msg["ad_id"])
-    
-    # Bulk fetch users and ads
-    users = await db.users.find({"id": {"$in": list(user_ids)}}, {"_id": 0}).to_list(len(user_ids)) if user_ids else []
-    ads = await db.ads.find({"id": {"$in": list(ad_ids)}}, {"_id": 0}).to_list(len(ad_ids)) if ad_ids else []
-    
-    # Create lookup dictionaries
-    users_dict = {u["id"]: u for u in users}
-    ads_dict = {a["id"]: a for a in ads}
-    
-    conversations = {}
-    for msg in messages:
-        other_user_id = msg["receiver_id"] if msg["sender_id"] == current_user["id"] else msg["sender_id"]
-        
-        if other_user_id not in conversations:
-            conversations[other_user_id] = {
-                "user": users_dict.get(other_user_id),
-                "ad": ads_dict.get(msg["ad_id"]),
-                "last_message": msg
-            }
-    
-    return list(conversations.values())
-
-@api_router.get("/messages/{other_user_id}", response_model=List[Message])
-async def get_messages(other_user_id: str, ad_id: str, current_user: dict = Depends(get_current_user)):
-    messages = await db.messages.find({
-        "ad_id": ad_id,
-        "$or": [
-            {"sender_id": current_user["id"], "receiver_id": other_user_id},
-            {"sender_id": other_user_id, "receiver_id": current_user["id"]}
-        ]
-    }, {"_id": 0}).sort("created_at", 1).to_list(100)
-    
-    await db.messages.update_many(
-        {"sender_id": other_user_id, "receiver_id": current_user["id"], "read": False},
-        {"$set": {"read": True}}
-    )
-    
-    return messages
-
-# Payment Endpoints
-@api_router.get("/payment/price")
-async def get_ad_price():
-    """Get current ad price (includes Friday discount in Tashkent timezone)"""
-    price = get_current_ad_price()
-    now = datetime.now(TASHKENT_TZ)
-    is_friday = now.weekday() == 4
-    return {
-        "price": price,
-        "original_price": AD_PRICE,
-        "discount": 50 if is_friday else 0,
-        "is_friday": is_friday,
-        "current_time": now.strftime("%Y-%m-%d %H:%M:%S %Z")
-    }
-
-@api_router.post("/payment/create", response_model=Payment)
-async def create_payment(payment_data: PaymentCreate, current_user: dict = Depends(get_current_user)):
-    """Create payment for ad"""
-    ad = await db.ads.find_one({"id": payment_data.ad_id, "user_id": current_user["id"]}, {"_id": 0})
-    if not ad:
-        raise HTTPException(status_code=404, detail="Ad not found")
-    
-    payment_id = str(uuid.uuid4())
-    payment = {
-        "id": payment_id,
-        "ad_id": payment_data.ad_id,
-        "user_id": current_user["id"],
-        "amount": payment_data.amount,
-        "payment_method": payment_data.payment_method,
-        "status": "pending",
-        "transaction_id": None,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-        "completed_at": None
-    }
-    
-    await db.payments.insert_one(payment)
-    return Payment(**payment)
-
-@api_router.post("/payment/{payment_id}/complete")
-async def complete_payment(payment_id: str, transaction_id: str, current_user: dict = Depends(get_current_user)):
-    """Complete payment and activate ad"""
-    payment = await db.payments.find_one({"id": payment_id, "user_id": current_user["id"]}, {"_id": 0})
-    if not payment:
-        raise HTTPException(status_code=404, detail="Payment not found")
-    
-    now = datetime.now(timezone.utc).isoformat()
-    
-    # Update payment
-    await db.payments.update_one(
-        {"id": payment_id},
-        {"$set": {"status": "completed", "transaction_id": transaction_id, "completed_at": now}}
-    )
-    
-    # Activate ad (set to pending for admin approval)
-    await db.ads.update_one(
-        {"id": payment["ad_id"]},
-        {"$set": {"status": "pending", "paid": True, "paid_at": now}}
-    )
-    
-    return {"status": "success", "message": "Payment completed"}
-
-# Admin Endpoints
-@api_router.get("/admin/stats")
-async def get_admin_stats(current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-    
-    total_users = await db.users.count_documents({})
-    total_ads = await db.ads.count_documents({})
-    active_ads = await db.ads.count_documents({"status": "active"})
-    pending_ads = await db.ads.count_documents({"status": "pending"})
-    rejected_ads = await db.ads.count_documents({"status": "rejected"})
-    
-    # Payment statistics
-    completed_payments = await db.payments.find({"status": "completed"}, {"_id": 0}).to_list(1000)
-    total_revenue = sum(p["amount"] for p in completed_payments)
-    
-    # Daily revenue
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    daily_payments = [p for p in completed_payments if datetime.fromisoformat(p["completed_at"]) >= today_start]
-    daily_revenue = sum(p["amount"] for p in daily_payments)
-    
-    # Weekly revenue
-    week_start = today_start - timedelta(days=today_start.weekday())
-    weekly_payments = [p for p in completed_payments if datetime.fromisoformat(p["completed_at"]) >= week_start]
-    weekly_revenue = sum(p["amount"] for p in weekly_payments)
-    
-    # Monthly revenue
-    month_start = today_start.replace(day=1)
-    monthly_payments = [p for p in completed_payments if datetime.fromisoformat(p["completed_at"]) >= month_start]
-    monthly_revenue = sum(p["amount"] for p in monthly_payments)
-    
-    return {
-        "total_users": total_users,
-        "total_ads": total_ads,
-        "active_ads": active_ads,
-        "pending_ads": pending_ads,
-        "rejected_ads": rejected_ads,
-        "total_revenue": total_revenue,
-        "daily_revenue": daily_revenue,
-        "weekly_revenue": weekly_revenue,
-        "monthly_revenue": monthly_revenue,
-        "new_users_today": 0,  # TODO: implement
-        "online_users": 0  # TODO: implement
-    }
-
-@api_router.post("/admin/ads/action")
-async def admin_ad_action(action: AdminAction, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-    
-    if action.action not in ["approve", "reject"]:
-        raise HTTPException(status_code=400, detail="Invalid action")
-    
-    status = "active" if action.action == "approve" else "rejected"
-    
-    result = await db.ads.update_one(
-        {"id": action.ad_id},
-        {"$set": {"status": status, "updated_at": datetime.now(timezone.utc).isoformat()}}
-    )
-    
-    if result.modified_count == 0:
-        raise HTTPException(status_code=404, detail="Ad not found")
-    
-    return {"status": status}
-
-@api_router.get("/admin/ads", response_model=List[Ad])
-async def get_admin_ads(status: Optional[str] = None, current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-    
-    query = {}
-    if status:
-        query["status"] = status
-    
-    ads = await db.ads.find(query, {"_id": 0}).sort("created_at", -1).to_list(100)
-    return ads
-
-@api_router.get("/admin/payments")
-async def get_admin_payments(current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-    
-    payments = await db.payments.find({}, {"_id": 0}).sort("created_at", -1).to_list(100)
-    return payments
-
-app.include_router(api_router)
-
+# CORS Configuration
 app.add_middleware(
     CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "https://gow-market.vercel.app",
+        "https://*.vercel.app"
+    ],
     allow_credentials=True,
-    allow_origins=os.environ.get('CORS_ORIGINS', '*').split(','),
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+# Trusted Hosts
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=[
+        "localhost",
+        "127.0.0.1",
+        "*.vercel.app",
+        "gow-market.vercel.app"
+    ]
 )
-logger = logging.getLogger(__name__)
 
-@app.on_event("startup")
-async def startup():
+# Custom Middleware
+app.middleware("http")(rate_limit_middleware)
+app.middleware("http")(logging_middleware)
+
+# ==================== GLOBAL ERROR HANDLER ====================
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    """Global error handler for all exceptions"""
+    error_msg = str(exc) if str(exc) else "Internal server error"
+    return JSONResponse(
+        status_code=500,
+        content={"success": False, "error": error_msg}
+    )
+
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    """HTTP exception handler"""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"success": False, "error": exc.detail}
+    )
+
+# ==================== HEALTH CHECK ====================
+@app.get("/", response_model=Dict)
+@app.get("/health", response_model=Dict)
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "success": True,
+        "status": "healthy",
+        "timestamp": safe_now().isoformat(),
+        "version": "1.0.0"
+    }
+
+# ==================== AUTH ENDPOINTS ====================
+@app.post("/api/auth/register", response_model=Dict)
+async def register_user(user_data: UserCreate):
+    """Register a new user"""
     try:
-        init_storage()
-        logger.info("Storage initialized")
+        # Check if user exists
+        existing_user = await safe_find_one(users_collection, {"phone": user_data.phone})
+        if existing_user:
+            raise HTTPException(status_code=400, detail="Phone number already registered")
+        
+        # Hash password
+        hashed_password = bcrypt.hashpw(user_data.password.encode(), bcrypt.gensalt())
+        
+        # Create user
+        user_dict = {
+            "phone": user_data.phone,
+            "password": hashed_password.decode(),
+            "name": user_data.name,
+            "email": user_data.email,
+            "role": user_data.role or "user",
+            "created_at": safe_now(),
+            "updated_at": safe_now(),
+            "is_active": True,
+            "last_login": None
+        }
+        
+        user_id = await safe_insert_one(users_collection, user_dict)
+        if not user_id:
+            raise HTTPException(status_code=500, detail="Failed to create user")
+        
+        # Get created user
+        user = await safe_find_one(users_collection, {"_id": safe_id(user_id)})
+        
+        # Create access token
+        token = create_access_token({"sub": user_id})
+        if not token:
+            raise HTTPException(status_code=500, detail="Failed to generate token")
+        
+        return {
+            "success": True,
+            "data": {
+                "user": user,
+                "token": token
+            }
+        }
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.warning(f"Storage init failed (will retry on first use): {e}")
-    
+        raise HTTPException(status_code=500, detail=f"Registration failed: {str(e)}")
+
+@app.post("/api/auth/login", response_model=Dict)
+async def login_user(login_data: UserLogin):
+    """Login user"""
     try:
-        # Create default categories
-        categories_exist = await db.categories.count_documents({})
-        if categories_exist == 0:
-            categories = [
-                {"id": str(uuid.uuid4()), "name_uz": "Telefonlar", "name_ru": "Телефоны", "icon": "smartphone"},
-                {"id": str(uuid.uuid4()), "name_uz": "Elektronika", "name_ru": "Электроника", "icon": "laptop"},
-                {"id": str(uuid.uuid4()), "name_uz": "Kompyuterlar", "name_ru": "Компьютеры", "icon": "monitor"},
-                {"id": str(uuid.uuid4()), "name_uz": "Avtomobillar", "name_ru": "Автомобили", "icon": "car"},
-                {"id": str(uuid.uuid4()), "name_uz": "Ko'chmas mulk", "name_ru": "Недвижимость", "icon": "home"},
-                {"id": str(uuid.uuid4()), "name_uz": "Ish o'rinlari", "name_ru": "Вакансии", "icon": "briefcase"},
-                {"id": str(uuid.uuid4()), "name_uz": "Kiyimlar", "name_ru": "Одежда", "icon": "shirt"},
-                {"id": str(uuid.uuid4()), "name_uz": "Xizmatlar", "name_ru": "Услуги", "icon": "wrench"},
-                {"id": str(uuid.uuid4()), "name_uz": "Sport", "name_ru": "Спорт", "icon": "dumbbell"},
-                {"id": str(uuid.uuid4()), "name_uz": "Boshqalar", "name_ru": "Другое", "icon": "package"}
+        # Find user
+        user = await safe_find_one(users_collection, {"phone": login_data.phone})
+        if not user:
+            raise HTTPException(status_code=401, detail="Invalid phone or password")
+        
+        # Verify password
+        if not bcrypt.checkpw(login_data.password.encode(), user.get("password", "").encode()):
+            raise HTTPException(status_code=401, detail="Invalid phone or password")
+        
+        # Update last login
+        await safe_update_one(
+            users_collection,
+            {"_id": safe_id(user.get("id"))},
+            {"$set": {"last_login": safe_now()}}
+        )
+        
+        # Create token
+        token = create_access_token({"sub": user.get("id")})
+        if not token:
+            raise HTTPException(status_code=500, detail="Failed to generate token")
+        
+        return {
+            "success": True,
+            "data": {
+                "user": user,
+                "token": token
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Login failed: {str(e)}")
+
+@app.get("/api/auth/me", response_model=Dict)
+async def get_me(request: Request):
+    """Get current user info"""
+    try:
+        user = await get_current_user_optional(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        
+        return {
+            "success": True,
+            "data": user
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get user info: {str(e)}")
+
+# ==================== CATEGORY ENDPOINTS ====================
+@app.get("/api/categories", response_model=Dict)
+async def get_categories():
+    """Get all categories"""
+    try:
+        categories = await safe_find(categories_collection, {}, sort=[("order", ASCENDING)])
+        
+        return {
+            "success": True,
+            "data": categories
+        }
+    except Exception as e:
+        print(f"Error fetching categories: {e}")
+        return {
+            "success": True,
+            "data": []
+        }
+
+@app.post("/api/categories", response_model=Dict)
+async def create_category(category_data: CategoryCreate, request: Request):
+    """Create a new category (admin only)"""
+    try:
+        # Check if admin
+        user = await get_current_user_optional(request)
+        if not user or user.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Admin access required")
+        
+        # Create category
+        category_dict = {
+            "name_uz": category_data.name_uz,
+            "name_ru": category_data.name_ru,
+            "icon": category_data.icon,
+            "order": category_data.order or 0,
+            "created_at": safe_now(),
+            "updated_at": safe_now()
+        }
+        
+        category_id = await safe_insert_one(categories_collection, category_dict)
+        if not category_id:
+            raise HTTPException(status_code=500, detail="Failed to create category")
+        
+        category = await safe_find_one(categories_collection, {"_id": safe_id(category_id)})
+        
+        return {
+            "success": True,
+            "data": category
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create category: {str(e)}")
+
+# ==================== AD ENDPOINTS ====================
+@app.get("/api/ads", response_model=Dict)
+async def get_ads(
+    limit: Optional[int] = 20,
+    offset: Optional[int] = 0,
+    search: Optional[str] = None,
+    category_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    status: Optional[str] = "active",
+    request: Request = None
+):
+    """Get ads with filtering and pagination"""
+    try:
+        # Build filter
+        filter_dict = {}
+        if status:
+            filter_dict["status"] = status
+        if category_id and safe_id(category_id):
+            filter_dict["category_id"] = category_id
+        if user_id and safe_id(user_id):
+            filter_dict["user_id"] = user_id
+        
+        # Search
+        if search:
+            filter_dict["$or"] = [
+                {"title": {"$regex": search, "$options": "i"}},
+                {"description": {"$regex": search, "$options": "i"}}
             ]
-            await db.categories.insert_many(categories)
-            logger.info("Default categories created")
         
-        # Delete all existing admin accounts and test users
-        await db.users.delete_many({"role": "admin"})
-        await db.users.delete_many({"phone": "+998945778512"})  # Clear admin phone collisions
-        await db.users.delete_many({"phone": {"$regex": "^\\+998901"}})  # Remove test accounts
+        # Pagination
+        limit = safe_int(limit, 20)
+        offset = safe_int(offset, 0)
+        if limit > 100:
+            limit = 100
         
-        # Create THE ONLY admin user
-        admin_id = str(uuid.uuid4())
-        admin_password = hash_password("adminq")
-        await db.users.insert_one({
-            "id": admin_id,
-            "phone": "+998945778512",
-            "name": "Administrator",
-            "password": admin_password,
-            "role": "admin",
-            "created_at": datetime.now(timezone.utc).isoformat()
-        })
-        logger.info("Admin user created: +998945778512 / password: adminq / token: " + admin_id)
-            
+        # Get ads
+        ads = await safe_find(
+            ads_collection,
+            filter_dict,
+            sort=[("created_at", DESCENDING)],
+            skip=offset,
+            limit=limit
+        )
+        
+        # Increment views for each ad (optional)
+        # Could be done asynchronously
+        
+        return {
+            "success": True,
+            "data": ads,
+            "pagination": {
+                "limit": limit,
+                "offset": offset
+            }
+        }
     except Exception as e:
-        logger.error(f"Database initialization failed: {e}")
+        print(f"Error fetching ads: {e}")
+        return {
+            "success": True,
+            "data": [],
+            "pagination": {
+                "limit": 20,
+                "offset": 0
+            }
+        }
 
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
+@app.get("/api/ads/{ad_id}", response_model=Dict)
+async def get_ad(ad_id: str):
+    """Get ad by ID"""
+    try:
+        if not safe_id(ad_id):
+            raise HTTPException(status_code=400, detail="Invalid ad ID")
+        
+        ad = await safe_find_one(ads_collection, {"_id": safe_id(ad_id)})
+        if not ad:
+            raise HTTPException(status_code=404, detail="Ad not found")
+        
+        # Increment views
+        await safe_update_one(
+            ads_collection,
+            {"_id": safe_id(ad_id)},
+            {"$inc": {"views": 1}}
+        )
+        ad["views"] = safe_int(ad.get("views", 0)) + 1
+        
+        return {
+            "success": True,
+            "data": ad
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get ad: {str(e)}")
+
+@app.post("/api/ads", response_model=Dict)
+async def create_ad(
+    request: Request,
+    title: str = Form(...),
+    description: str = Form(...),
+    price: Optional[float] = Form(None),
+    category_id: str = Form(...),
+    contact_name: str = Form(...),
+    contact_phone: str = Form(...),
+    contact_methods: str = Form("chat,call"),
+    location: str = Form("{}"),
+    can_deliver: bool = Form(False),
+    characteristics: str = Form("{}"),
+    images: List[UploadFile] = File([])
+):
+    """Create a new ad"""
+    try:
+        # Get current user
+        user = await get_current_user_optional(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        
+        # Validate category
+        if not safe_id(category_id):
+            raise HTTPException(status_code=400, detail="Invalid category ID")
+        
+        category = await safe_find_one(categories_collection, {"_id": safe_id(category_id)})
+        if not category:
+            raise HTTPException(status_code=400, detail="Category not found")
+        
+        # Parse JSON fields
+        try:
+            location_dict = json.loads(location) if location else {}
+        except:
+            location_dict = {}
+        
+        try:
+            characteristics_dict = json.loads(characteristics) if characteristics else {}
+        except:
+            characteristics_dict = {}
+        
+        contact_methods_list = [m.strip() for m in contact_methods.split(",") if m.strip()]
+        if not contact_methods_list:
+            contact_methods_list = ["chat", "call"]
+        
+        # Process images
+        image_filenames = []
+        for image in images[:5]:  # Max 5 images
+            if not image.filename:
+                continue
+            
+            # Validate file
+            ext = Path(image.filename).suffix.lower()
+            if ext not in ALLOWED_EXTENSIONS:
+                continue
+            
+            # Check size
+            content = await image.read()
+            if len(content) > MAX_FILE_SIZE:
+                continue
+            
+            # Generate safe filename
+            file_hash = hashlib.md5(content).hexdigest()[:8]
+            safe_name = f"{file_hash}_{uuid.uuid4().hex[:8]}{ext}"
+            
+            # Save file
+            upload_dir = Path("uploads")
+            upload_dir.mkdir(exist_ok=True)
+            
+            file_path = upload_dir / safe_name
+            with open(file_path, "wb") as f:
+                f.write(content)
+            
+            image_filenames.append(safe_name)
+        
+        # Create ad
+        ad_dict = {
+            "title": title,
+            "description": description,
+            "price": price,
+            "category_id": category_id,
+            "user_id": user.get("id"),
+            "contact_name": contact_name,
+            "contact_phone": contact_phone,
+            "contact_methods": contact_methods_list,
+            "location": location_dict,
+            "can_deliver": can_deliver,
+            "characteristics": characteristics_dict,
+            "images": image_filenames,
+            "views": 0,
+            "status": "active",
+            "created_at": safe_now(),
+            "updated_at": safe_now()
+        }
+        
+        ad_id = await safe_insert_one(ads_collection, ad_dict)
+        if not ad_id:
+            raise HTTPException(status_code=500, detail="Failed to create ad")
+        
+        ad = await safe_find_one(ads_collection, {"_id": safe_id(ad_id)})
+        
+        return {
+            "success": True,
+            "data": ad
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to create ad: {str(e)}")
+
+@app.put("/api/ads/{ad_id}", response_model=Dict)
+async def update_ad(ad_id: str, ad_data: AdUpdate, request: Request):
+    """Update an ad"""
+    try:
+        if not safe_id(ad_id):
+            raise HTTPException(status_code=400, detail="Invalid ad ID")
+        
+        # Get user
+        user = await get_current_user_optional(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        
+        # Get ad
+        ad = await safe_find_one(ads_collection, {"_id": safe_id(ad_id)})
+        if not ad:
+            raise HTTPException(status_code=404, detail="Ad not found")
+        
+        # Check ownership
+        if ad.get("user_id") != user.get("id") and user.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Not authorized to update this ad")
+        
+        # Build update
+        update_dict = {}
+        for field, value in ad_data.dict(exclude_unset=True).items():
+            if value is not None:
+                update_dict[field] = value
+        
+        if not update_dict:
+            return {"success": True, "data": ad}
+        
+        update_dict["updated_at"] = safe_now()
+        
+        # Update
+        updated = await safe_update_one(
+            ads_collection,
+            {"_id": safe_id(ad_id)},
+            {"$set": update_dict}
+        )
+        
+        if not updated:
+            raise HTTPException(status_code=500, detail="Failed to update ad")
+        
+        updated_ad = await safe_find_one(ads_collection, {"_id": safe_id(ad_id)})
+        
+        return {
+            "success": True,
+            "data": updated_ad
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update ad: {str(e)}")
+
+@app.delete("/api/ads/{ad_id}", response_model=Dict)
+async def delete_ad(ad_id: str, request: Request):
+    """Delete an ad"""
+    try:
+        if not safe_id(ad_id):
+            raise HTTPException(status_code=400, detail="Invalid ad ID")
+        
+        # Get user
+        user = await get_current_user_optional(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        
+        # Get ad
+        ad = await safe_find_one(ads_collection, {"_id": safe_id(ad_id)})
+        if not ad:
+            raise HTTPException(status_code=404, detail="Ad not found")
+        
+        # Check ownership
+        if ad.get("user_id") != user.get("id") and user.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Not authorized to delete this ad")
+        
+        # Delete
+        deleted = await safe_delete_one(ads_collection, {"_id": safe_id(ad_id)})
+        
+        if not deleted:
+            raise HTTPException(status_code=500, detail="Failed to delete ad")
+        
+        return {
+            "success": True,
+            "message": "Ad deleted successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete ad: {str(e)}")
+
+# ==================== FAVORITE ENDPOINTS ====================
+@app.post("/api/favorites/toggle", response_model=Dict)
+async def toggle_favorite(favorite_data: FavoriteToggle, request: Request):
+    """Toggle favorite status for an ad"""
+    try:
+        # Get user
+        user = await get_current_user_optional(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        
+        # Validate ad
+        if not safe_id(favorite_data.ad_id):
+            raise HTTPException(status_code=400, detail="Invalid ad ID")
+        
+        ad = await safe_find_one(ads_collection, {"_id": safe_id(favorite_data.ad_id)})
+        if not ad:
+            raise HTTPException(status_code=404, detail="Ad not found")
+        
+        user_id = user.get("id")
+        
+        # Check if favorited
+        existing = await safe_find_one(
+            favorites_collection,
+            {"user_id": user_id, "ad_id": favorite_data.ad_id}
+        )
+        
+        if existing:
+            # Remove favorite
+            await safe_delete_one(
+                favorites_collection,
+                {"user_id": user_id, "ad_id": favorite_data.ad_id}
+            )
+            return {
+                "success": True,
+                "data": {"favorited": False}
+            }
+        else:
+            # Add favorite
+            favorite_dict = {
+                "user_id": user_id,
+                "ad_id": favorite_data.ad_id,
+                "created_at": safe_now()
+            }
+            await safe_insert_one(favorites_collection, favorite_dict)
+            return {
+                "success": True,
+                "data": {"favorited": True}
+            }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to toggle favorite: {str(e)}")
+
+@app.get("/api/favorites", response_model=Dict)
+async def get_favorites(request: Request):
+    """Get user's favorite ads"""
+    try:
+        # Get user
+        user = await get_current_user_optional(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        
+        user_id = user.get("id")
+        
+        # Get favorites
+        favorites = await safe_find(
+            favorites_collection,
+            {"user_id": user_id}
+        )
+        
+        # Get ad details
+        ad_ids = [f.get("ad_id") for f in favorites if f.get("ad_id")]
+        ads = []
+        for ad_id in ad_ids:
+            if safe_id(ad_id):
+                ad = await safe_find_one(ads_collection, {"_id": safe_id(ad_id)})
+                if ad:
+                    ads.append(ad)
+        
+        return {
+            "success": True,
+            "data": ads
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get favorites: {str(e)}")
+
+# ==================== MESSAGE ENDPOINTS ====================
+@app.get("/api/messages", response_model=Dict)
+async def get_messages(request: Request):
+    """Get user's messages"""
+    try:
+        # Get user
+        user = await get_current_user_optional(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        
+        user_id = user.get("id")
+        
+        # Get messages
+        messages = await safe_find(
+            messages_collection,
+            {"$or": [{"sender_id": user_id}, {"receiver_id": user_id}]},
+            sort=[("created_at", DESCENDING)]
+        )
+        
+        return {
+            "success": True,
+            "data": messages
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get messages: {str(e)}")
+
+@app.post("/api/messages", response_model=Dict)
+async def send_message(message_data: MessageCreate, request: Request):
+    """Send a message"""
+    try:
+        # Get user
+        user = await get_current_user_optional(request)
+        if not user:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        
+        # Validate receiver
+        if not safe_id(message_data.receiver_id):
+            raise HTTPException(status_code=400, detail="Invalid receiver ID")
+        
+        receiver = await safe_find_one(users_collection, {"_id": safe_id(message_data.receiver_id)})
+        if not receiver:
+            raise HTTPException(status_code=404, detail="Receiver not found")
+        
+        # Validate ad
+        if not safe_id(message_data.ad_id):
+            raise HTTPException(status_code=400, detail="Invalid ad ID")
+        
+        ad = await safe_find_one(ads_collection, {"_id": safe_id(message_data.ad_id)})
+        if not ad:
+            raise HTTPException(status_code=404, detail="Ad not found")
+        
+        user_id = user.get("id")
+        
+        # Create message
+        message_dict = {
+            "ad_id": message_data.ad_id,
+            "sender_id": user_id,
+            "receiver_id": message_data.receiver_id,
+            "text": message_data.text,
+            "read": False,
+            "created_at": safe_now(),
+            "updated_at": safe_now()
+        }
+        
+        message_id = await safe_insert_one(messages_collection, message_dict)
+        if not message_id:
+            raise HTTPException(status_code=500, detail="Failed to send message")
+        
+        message = await safe_find_one(messages_collection, {"_id": safe_id(message_id)})
+        
+        return {
+            "success": True,
+            "data": message
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to send message: {str(e)}")
+
+# ==================== UPLOAD ENDPOINTS ====================
+@app.get("/api/files/{filename}", response_model=Any)
+async def get_file(filename: str):
+    """Get uploaded file"""
+    try:
+        # Security: prevent directory traversal
+        if ".." in filename or "/" in filename or "\\" in filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        
+        file_path = Path("uploads") / filename
+        if not file_path.exists():
+            raise HTTPException(status_code=404, detail="File not found")
+        
+        return FileResponse(file_path)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to get file: {str(e)}")
+
+@app.post("/api/upload", response_model=Dict)
+async def upload_file(file: UploadFile = File(...), request: Request = None):
+    """Upload a file"""
+    try:
+        # Check authentication
+        if request:
+            user = await get_current_user_optional(request)
+            if not user:
+                raise HTTPException(status_code=401, detail="Not authenticated")
+        
+        # Validate file
+        if not file.filename:
+            raise HTTPException(status_code=400, detail="No filename provided")
+        
+        # Check extension
+        ext = Path(file.filename).suffix.lower()
+        if ext not in ALLOWED_EXTENSIONS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File type not allowed. Allowed: {', '.join(ALLOWED_EXTENSIONS)}"
+            )
+        
+        # Check content
+        content = await file.read()
+        if len(content) == 0:
+            raise HTTPException(status_code=400, detail="Empty file")
+        
+        if len(content) > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=400,
+                detail=f"File too large. Max size: {MAX_FILE_SIZE // (1024*1024)}MB"
+            )
+        
+        # Verify image
+        try:
+            Image.open(content)
+        except:
+            raise HTTPException(status_code=400, detail="Invalid image file")
+        
+        # Generate safe filename
+        file_hash = hashlib.md5(content).hexdigest()[:8]
+        safe_name = f"{file_hash}_{uuid.uuid4().hex[:8]}{ext}"
+        
+        # Save file
+        upload_dir = Path("uploads")
+        upload_dir.mkdir(exist_ok=True)
+        
+        file_path = upload_dir / safe_name
+        with open(file_path, "wb") as f:
+            f.write(content)
+        
+        return {
+            "success": True,
+            "data": {
+                "filename": safe_name,
+                "url": f"/api/files/{safe_name}",
+                "size": len(content)
+            }
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to upload file: {str(e)}")
+
+# ==================== STARTUP ====================
+@app.on_event("startup")
+async def startup_event():
+    """Startup tasks"""
+    print("🚀 Starting GOW Market API...")
+    await create_indexes()
+    print("✅ API started successfully")
+
+# ==================== MAIN ====================
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "server:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=False,
+        workers=4
+    )
