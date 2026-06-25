@@ -7,6 +7,7 @@ import Header from "@/components/Header";
 import { Button } from "@/components/ui/button";
 import { Heart, Eye } from "lucide-react";
 import { toast } from "sonner";
+import { safeExtractArray } from "@/utils/apiHelpers";
 
 const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
 const API = `${BACKEND_URL}/api`;
@@ -34,10 +35,13 @@ const Home = () => {
   const fetchCategories = useCallback(async () => {
     try {
       const response = await axios.get(`${API}/categories`);
-      setCategories(response.data);
+      // Safely extract array from response
+      const categoriesArray = safeExtractArray(response.data);
+      setCategories(categoriesArray);
     } catch (error) {
       console.error("Failed to fetch categories:", error);
       toast.error(t("error"), { description: t("failed_to_load_categories") });
+      setCategories([]);
     }
   }, [t]);
 
@@ -52,10 +56,13 @@ const Home = () => {
       if (category) params.append("category_id", category);
       
       const response = await axios.get(`${API}/ads?${params}`);
-      setAds(response.data);
+      // Safely extract array from response
+      const adsArray = safeExtractArray(response.data);
+      setAds(adsArray);
     } catch (error) {
       console.error("Failed to fetch ads:", error);
       toast.error(t("error"), { description: t("failed_to_load_ads") });
+      setAds([]);
     } finally {
       setLoading(false);
     }
@@ -109,7 +116,7 @@ const Home = () => {
       <div
         className="relative h-[400px] flex items-center justify-center overflow-hidden"
         style={{
-          backgroundImage: 'url("https://images.unsplash.com/photo-1553544438-f38bf768a907?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NDh8MHwxfHNlYXJjaHwyfHxzYW1hcmthbmQlMjBhcmNoaXRlY3R1cmV8ZW58MHx8fHwxNzgyMjg4NzYzfDA&ixlib=rb-4.1.0&q=85")',
+          backgroundImage: 'url("https://images.unsplash.com/photo-1553544438-f38bf768a907?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NDh8MHwxfHNlYXJjaHwyfHxzYW1hcmthbmQlMjBhcmNoaXRlY3R1cmV8ZW58MHx[...]',
           backgroundSize: 'cover',
           backgroundPosition: 'center'
         }}
@@ -143,7 +150,7 @@ const Home = () => {
           {t("categories")}
         </h2>
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
-          {categories.map((category) => (
+          {Array.isArray(categories) && categories.map((category) => (
             <button
               key={category.id}
               onClick={() => handleCategoryClick(category.id)}
@@ -186,7 +193,7 @@ const Home = () => {
           <div className="text-center py-12">
             <div className="text-zinc-600 dark:text-zinc-400">{t("loading")}</div>
           </div>
-        ) : ads.length === 0 ? (
+        ) : !Array.isArray(ads) || ads.length === 0 ? (
           <div className="text-center py-12">
             <div className="text-zinc-600 dark:text-zinc-400">{t("no_results")}</div>
           </div>
@@ -202,7 +209,7 @@ const Home = () => {
                   className="relative h-48 bg-zinc-100 dark:bg-zinc-800 overflow-hidden cursor-pointer"
                   onClick={() => navigate(`/ad/${ad.id}`)}
                 >
-                  {ad.images && ad.images.length > 0 ? (
+                  {ad.images && Array.isArray(ad.images) && ad.images.length > 0 ? (
                     <img
                       src={`${API}/files/${ad.images[0]}`}
                       alt={ad.title}
