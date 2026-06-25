@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -47,6 +47,15 @@ const CreateAd = () => {
   const [images, setImages] = useState([]);
   const [imagePreviews, setImagePreviews] = useState([]);
 
+  const fetchCategories = useCallback(async () => {
+    try {
+      const response = await axios.get(`${API}/categories`);
+      setCategories(response.data);
+    } catch (error) {
+      toast.error(t("error"));
+    }
+  }, [t]);
+
   useEffect(() => {
     if (authLoading) return;
     
@@ -56,16 +65,7 @@ const CreateAd = () => {
       return;
     }
     fetchCategories();
-  }, [token, authLoading, navigate]);
-
-  const fetchCategories = async () => {
-    try {
-      const response = await axios.get(`${API}/categories`);
-      setCategories(response.data);
-    } catch (error) {
-      toast.error(t("error"));
-    }
-  };
+  }, [token, authLoading, navigate, fetchCategories, t]);
 
   const handleImageChange = (e) => {
     const files = Array.from(e.target.files);
@@ -177,7 +177,7 @@ const CreateAd = () => {
               ))}
               
               {images.length < 10 && (
-                <label className="aspect-square border-2 border-dashed border-zinc-300 dark:border-zinc-700 rounded-lg flex flex-col items-center justify-center cursor-pointer hover:border-zinc-400 dark:hover:border-zinc-600 transition" data-testid="upload-image-btn">
+                <label className="aspect-square border-2 border-dashed border-zinc-300 dark:border-zinc-700 rounded-lg flex flex-col items-center justify-center cursor-pointer hover:border-zinc-400 dark:hover:border-zinc-600 transition">
                   <Upload className="w-8 h-8 text-zinc-400 mb-2" />
                   <span className="text-sm text-zinc-600 dark:text-zinc-400">{t("drag_drop")}</span>
                   <input
