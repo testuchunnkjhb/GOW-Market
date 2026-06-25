@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useLanguage } from "@/contexts/LanguageContext";
 import { useAuth } from "@/contexts/AuthContext";
@@ -23,29 +23,7 @@ const Messages = () => {
   const [newMessage, setNewMessage] = useState("");
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    if (authLoading) return;
-    
-    if (!token) {
-      navigate("/");
-      return;
-    }
-    fetchConversations();
-  }, [token, authLoading, navigate]);
-
-  useEffect(() => {
-    const adId = searchParams.get("ad");
-    const userId = searchParams.get("user");
-    
-    if (adId && userId && conversations.length > 0) {
-      const conv = conversations.find(c => c.ad?.id === adId && c.user?.id === userId);
-      if (conv) {
-        selectConversation(conv);
-      }
-    }
-  }, [searchParams, conversations]);
-
-  const fetchConversations = async () => {
+  const fetchConversations = useCallback(async () => {
     setLoading(true);
     try {
       const response = await axios.get(`${API}/messages/conversations`, {
@@ -57,9 +35,9 @@ const Messages = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [token, t]);
 
-  const selectConversation = async (conversation) => {
+  const selectConversation = useCallback(async (conversation) => {
     setSelectedConversation(conversation);
     try {
       const response = await axios.get(
@@ -70,7 +48,29 @@ const Messages = () => {
     } catch (error) {
       toast.error(t("error"));
     }
-  };
+  }, [token, t]);
+
+  useEffect(() => {
+    if (authLoading) return;
+    
+    if (!token) {
+      navigate("/");
+      return;
+    }
+    fetchConversations();
+  }, [token, authLoading, navigate, fetchConversations]);
+
+  useEffect(() => {
+    const adId = searchParams.get("ad");
+    const userId = searchParams.get("user");
+    
+    if (adId && userId && conversations.length > 0) {
+      const conv = conversations.find(c => c.ad?.id === adId && c.user?.id === userId);
+      if (conv) {
+        selectConversation(conv);
+      }
+    }
+  }, [searchParams, conversations, selectConversation]);
 
   const sendMessage = async (e) => {
     e.preventDefault();
