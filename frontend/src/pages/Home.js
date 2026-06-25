@@ -116,7 +116,7 @@ const Home = () => {
       <div
         className="relative h-[400px] flex items-center justify-center overflow-hidden"
         style={{
-          backgroundImage: 'url("https://images.unsplash.com/photo-1553544438-f38bf768a907?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NDh8MHwxfHNlYXJjaHwyfHxzYW1hcmthbmQlMjBhcmNoaXRlY3R1cmV8ZW58MHx[...]',
+          backgroundImage: 'url("https://images.unsplash.com/photo-1553544438-f38bf768a907?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NDh8MHwxfHNlYXJjaHwyfHxzYW1hcmthbmQlMjBhcmNoaXRlY3R1cmV8ZW58MHx8fHwxNzgyMjg4NzYzfDA&ixlib=rb-4.1.0&q=85")',
           backgroundSize: 'cover',
           backgroundPosition: 'center'
         }}
@@ -150,25 +150,31 @@ const Home = () => {
           {t("categories")}
         </h2>
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
-          {Array.isArray(categories) && categories.map((category) => (
-            <button
-              key={category.id}
-              onClick={() => handleCategoryClick(category.id)}
-              className={`p-6 border rounded-lg transition hover:-translate-y-1 hover:shadow-lg ${
-                selectedCategory === category.id
-                  ? "border-red-600 bg-red-50 dark:bg-red-950/20"
-                  : "border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900"
-              }`}
-              data-testid={`category-${category.id}`}
-            >
-              <div className="text-center">
-                <div className="text-2xl mb-2">📦</div>
-                <div className="text-sm font-bold text-zinc-950 dark:text-white">
-                  {language === "uz" ? category.name_uz : category.name_ru}
+          {Array.isArray(categories) && categories.length > 0 ? (
+            categories.map((category) => (
+              <button
+                key={category.id}
+                onClick={() => handleCategoryClick(category.id)}
+                className={`p-6 border rounded-lg transition hover:-translate-y-1 hover:shadow-lg ${
+                  selectedCategory === category.id
+                    ? "border-red-600 bg-red-50 dark:bg-red-950/20"
+                    : "border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900"
+                }`}
+                data-testid={`category-${category.id}`}
+              >
+                <div className="text-center">
+                  <div className="text-2xl mb-2">📦</div>
+                  <div className="text-sm font-bold text-zinc-950 dark:text-white">
+                    {language === "uz" ? category.name_uz : category.name_ru}
+                  </div>
                 </div>
-              </div>
-            </button>
-          ))}
+              </button>
+            ))
+          ) : (
+            <div className="col-span-full text-center py-8 text-zinc-600 dark:text-zinc-400">
+              {t("no_categories")}
+            </div>
+          )}
         </div>
       </div>
 
@@ -220,7 +226,7 @@ const Home = () => {
                     />
                   ) : (
                     <div className="w-full h-full flex items-center justify-center text-zinc-400">
-                      No image
+                      {t("no_image")}
                     </div>
                   )}
                   <button
@@ -242,7 +248,7 @@ const Home = () => {
                   >
                     {ad.title}
                   </h3>
-                  {ad.price && (
+                  {ad.price != null && (
                     <div className="text-xl font-black text-red-600 mb-2">
                       {new Intl.NumberFormat('uz-UZ').format(ad.price)} UZS
                     </div>
@@ -250,7 +256,7 @@ const Home = () => {
                   <div className="flex items-center justify-between text-sm text-zinc-600 dark:text-zinc-400">
                     <div className="flex items-center gap-1">
                       <Eye className="w-4 h-4" />
-                      <span>{ad.views}</span>
+                      <span>{ad.views || 0}</span>
                     </div>
                     <div className="text-xs">
                       {ad.location?.address || "Samarqand"}
